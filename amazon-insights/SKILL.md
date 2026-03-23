@@ -353,3 +353,226 @@ python3 ~/openclaw/skills/amazon-insights/scripts/generate-batch-summary.py
 - `scripts/batch-run.sh` — 批量队列调度
 - `scripts/batch-status.sh` — 批量进度查看
 - `scripts/generate-batch-summary.py` — 汇总总览生成
+
+---
+
+## 品类级汇总报告规范（多ASIN / 批量模式专用）
+
+> 适用场景：用户提供多个 ASIN（2+）或要求生成品类分析报告时触发。
+> 单 ASIN 报告沿用原有7模块结构（Step 5）。
+
+### 报告生成两段式流程（强制执行）
+
+**第一段：数据处理脚本**
+```bash
+python3 /tmp/gen_report_data.py
+# 输出：/tmp/report_data.json
+# 职责：读取 Excel / JSON 原始数据，完成所有计算和聚合，输出纯数据 JSON
+# 验证：检查 absa、asinDetails、productTable 等关键字段是否非空
+```
+
+**第二段：HTML 生成脚本**
+```bash
+python3 /tmp/build_report.py
+# 输入：/tmp/report_data.json
+# 输出：/Users/macmini/Documents/amazonskill/report-PSPS-{YYYYMMDD-HHMMSS}.html
+# 职责：读取 JSON，拼接 HTML，写文件
+# 验证：文件大小 > 100KB（含AI总结）
+```
+
+两段分离的原因：数据处理失败不影响已有数据，HTML生成失败可直接重跑第二段，避免重复爬取和计算。
+
+### 品类级报告固定结构（严格按序，不可缺省）
+
+| 编号 | 部分名称 | 数据来源字段 | 图表类型 |
+|------|---------|------------|---------|
+| 第0部分 | 品类总览 Dashboard | meta / priceDist / ratingDist / productTable | KPI卡片 + 柱状图 + 饼图 + 表格 |
+| **总结部分** | **品类总体分析总结（AI生成）** | **ai_summary_input.json（提炼自report_data）** | **5卡片文字布局** |
+| 第1部分 | PSPS 用户画像 | personaWords / scenarioTop10 / painTop5 | 横向条形图 × 3 |
+| 第2部分 | ABSA 方面级情感分析 | absaList | 水平堆叠条形图 |
+| 第3部分 | $APPEALS 8维竞争力 | appealsData | 南丁格尔玫瑰图 + 列表 |
+| 第4部分 | KANO 需求分类 | kanoList | CSS 彩色表格 |
+| 第5部分 | 痛爽痒三维图谱 | painData / joyData / itchData | 三列卡片 |
+| 第6部分 | 用户旅程摩擦分析 | journeyData / journeyTop3 | 折线图 + 摩擦卡片 |
+| 第7部分 | 逐品 ASIN 拆解 | asinDetails | details 折叠卡片 × N |
+
+### 品类总体分析总结（AI动态生成）规范
+
+**触发时机**：build_report.py 运行时，在写入第1部分之前调用 LLM 生成。
+
+**输入数据**（从 report_data.json 提炼，写入 /tmp/ai_summary_input.json）：
+```json
+{
+  "meta": { "totalProducts": 52, "avgRating": 4.36, "totalReviews": 92036, "negRate": 12.9 },
+  "priceDist": { "$0-20": 7, ... },
+  "topPersona": [["kids", 515], ...],
+  "topScenario": [["gift", 182], ...],
+  "crisisAspects": [{ "name": "Functionality", "negRatio": 0.696 }, ...],
+  "attractiveKano": [{ "aspect": "...", "posRatio": 90.0 }, ...],
+  "topPain": [["battery", 31], ...],
+  "topJourney": [["首次使用", 55], ...],
+  "appealsTopNeg": [["Performance", {"negTotal": 540}], ...]
+}
+```
+
+**LLM 调用方式**（使用已配置的 LiteLLM 接口）：
+```python
+import json, urllib.request
+with open('/Users/macmini/.openclaw/openclaw.json') as f:
+    cfg = json.load(f)
+litellm = cfg['models']['providers']['litellm']
+base_url = litellm['baseUrl']   # http://43.134.133.185:4000
+api_key  = litellm['apiKey']
+
+payload = json.dumps({
+    "model": "claude-sonnet-4-6",
+    "messages": [{"role": "user", "content": PROMPT}],
+    "max_tokens": 2000,
+    "temperature": 0.3
+}).encode('utf-8')
+req = urllib.request.Request(
+    f"{base_url}/v1/chat/completions",
+    data=payload,
+    headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+)
+with urllib.request.urlopen(req, timeout=60) as resp:
+    result = json.loads(resp.read())
+ai_html = result['choices'][0]['message']['content'].strip()
+```
+
+**Prompt 模板**（见下方，已验证可用）：
+> 输出5个卡片：📊竞争格局 / 👥核心用户画像 / 🚀Top3机会点（绿色） / ⚠️Top3风险点（红色） / 💡入场建议
+> 前两个卡片 grid 双列布局，后三个独立卡片
+> 纯 HTML inline style，语言中文，不含 markdown
+
+**输出**：写入 /tmp/ai_summary_block.html，插入 `<h2>第1部分` 标记之前。
+
+### 视觉规范（品类报告）
+
+```css
+背景：#f5f5f5（页面）/ #ffffff（卡片）
+主色：#2c3e50
+警示色：#b71c1c（危机/风险）
+机会色：#1b5e20（机会点）
+卡片：border:1px solid #e0e0e0，无圆角，无阴影
+字体：-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif
+容器：max-width:1400px; margin:0 auto; padding:24px
+ECharts CDN：https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js
+ASIN 图表 id 格式：chart-{ASIN}（唯一，在 ontoggle 事件中初始化）
+```
+
+---
+
+## 上下文过长处理机制（强制执行）
+
+> 品类报告 HTML 通常 > 100KB，单次 exec 传入大字符串会触发 `run error: terminated`。
+> 以下规范必须严格遵守，任何违反都会导致报告生成失败。
+
+### 核心原则
+
+1. **脚本文件优先**：所有 Python 代码必须先写入文件，再用 `python3 /tmp/xxx.py` 执行，禁止在 exec 中直接传入超过 100 行的 Python 字符串
+2. **分段写入**：单个脚本文件超过 300 行时，用 `cat >> /tmp/script.py << 'EOF'` 分段追加，每段 ≤ 150 行
+3. **两段式分离**：数据处理（gen_report_data.py）与 HTML 生成（build_report.py）必须是两个独立脚本，分别运行
+4. **禁止子代理用于大文件生成**：子代理有 5 分钟超时限制，品类报告生成通常需要 3-8 分钟，超时后无法恢复进度，应在主会话分段执行
+
+### 分段写入模板
+
+```bash
+# 第1段：初始化 + 数据加载
+cat > /tmp/build_report.py << 'PYEOF'
+import json, datetime, os
+with open('/tmp/report_data.json') as f:
+    D = json.load(f)
+parts = []
+# ... 第1段内容（≤150行）
+PYEOF
+
+# 第2段：追加第0部分 HTML
+cat >> /tmp/build_report.py << 'PYEOF'
+# 第0部分 Dashboard
+parts.append("""...""")
+PYEOF
+
+# 第3段：追加第1部分
+cat >> /tmp/build_report.py << 'PYEOF'
+# 第1部分 PSPS
+PYEOF
+
+# ... 每个报告部分一段，最后一段写文件
+cat >> /tmp/build_report.py << 'PYEOF'
+# 写出文件
+html = ''.join(parts)
+with open(OUT, 'w', encoding='utf-8') as f:
+    f.write(html)
+size_kb = os.path.getsize(OUT) / 1024
+print(f"✅ 报告已生成：{OUT}，大小：{size_kb:.1f}KB")
+PYEOF
+
+# 最后统一运行
+python3 /tmp/build_report.py
+```
+
+### 降级链
+
+```
+优先：主会话分段 exec（cat >> 写文件，最稳定）
+↓ 如果单段仍超限（极少见）
+降级：进一步拆分，每段 ≤ 80 行
+↓ 如果遇到语法错误
+修复：用 python3 -c "..." 小脚本定点修复，不重写整个文件
+↓ 子代理（仅用于数据处理脚本，不用于 HTML 生成）
+限制：runTimeoutSeconds: 180，只跑 gen_report_data.py
+```
+
+### 常见错误及修复
+
+| 错误 | 原因 | 修复方式 |
+|------|------|---------|
+| `run error: terminated` | exec 内容过大 | 改用 `cat > file << 'EOF'` 写文件后运行 |
+| `SyntaxError: invalid syntax` 在 f-string 内 | f-string 内嵌引号冲突 | 改用字符串拼接 `"<div>" + var + "</div>"` |
+| `ABSA aspects: 0` | aspects 字段名为 `aspectSentiment` 非 `sentiment` | 见下方字段映射 |
+| 文件 < 100KB | AI总结未生成 / ASIN详情为空 | 检查 LLM 调用是否成功，检查 asinDetails 字段 |
+
+---
+
+## 已知字段映射（数据容错）
+
+### Excel 评论数据字段
+
+| 字段用途 | 实际字段名 | 备注 |
+|---------|-----------|------|
+| aspect 情感倾向 | `aspectSentiment` | ⚠️ 非 `sentiment`，解析必须用此字段名 |
+| aspect 名称 | `aspectName` | 正常 |
+| 评论正文 | `reviewText` | 正常 |
+| 评论星级 | `rating` | 字符串或数字，用 `float()` 转换 |
+| AI评论总结 | `reviewsAISummary` | 每个 ASIN 多条评论共享同一个值 |
+
+### aspects 字段解析（强制容错）
+
+```python
+import ast, re
+
+def parse_aspects(aspect_str):
+    """解析 aspects 字段：Python list格式字符串，情感字段为 aspectSentiment"""
+    if not aspect_str or str(aspect_str) == 'None':
+        return []
+    try:
+        result = ast.literal_eval(str(aspect_str))
+        if isinstance(result, list):
+            return [
+                {
+                    'aspectName': item.get('aspectName', ''),
+                    'sentiment':  item.get('aspectSentiment', item.get('sentiment', ''))
+                }
+                for item in result if isinstance(item, dict) and item.get('aspectName')
+            ]
+    except:
+        pass
+    # 降级：正则提取
+    matches = re.findall(
+        r"'aspectName'\s*:\s*'([^']+)'.*?'aspectSentiment'\s*:\s*'([^']+)'", 
+        str(aspect_str)
+    )
+    return [{'aspectName': m[0], 'sentiment': m[1]} for m in matches]
+```
+
