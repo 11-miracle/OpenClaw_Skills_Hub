@@ -1,0 +1,7 @@
+interface:
+  display_name: "IMAP Read Email"
+  short_description: "Read/filter IMAP inbox and summarize key emails."
+  default_prompt: "Use $imap-read-email to read and filter IMAP emails, then summarize important messages."
+
+policy:
+  allow_implicit_invocation: true
