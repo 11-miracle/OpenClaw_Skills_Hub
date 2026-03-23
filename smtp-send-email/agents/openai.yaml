@@ -1,0 +1,7 @@
+interface:
+  display_name: "SMTP Send Email"
+  short_description: "Send SMTP mail with optional attachments."
+  default_prompt: "Use this skill to send email via SMTP, including attachments. Collect recipients, subject, content, and file paths, then run the sender script."
+
+policy:
+  allow_implicit_invocation: true
