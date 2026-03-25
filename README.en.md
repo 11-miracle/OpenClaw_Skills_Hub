@@ -1,78 +1,89 @@
 # OpenClaw Skills Hub
 
-A collection of plug-and-play skills for Claude Code. Each skill bundles a complete toolchain — scripts, AI prompts, and reference docs — driven by a `SKILL.md` descriptor and invokable through natural language in any Claude Code session.
+A collection of plug-and-play skills for Claude Code. Each skill is driven by a `SKILL.md` descriptor and bundles scripts, prompts, and references so it can be invoked directly with natural language.
 
----
+[中文说明](README.md)
 
-## Skills
+## Quick Start
 
-### 🔍 amazon-insights — Amazon Product Intelligence
+1. Clone this repository:
 
-End-to-end analysis pipeline from ASIN to visual HTML report. Three modes:
+```bash
+git clone https://gitee.com/miracle_1101/openclaw_skills_hub.git ~/openclaw/skills
+```
+
+2. Register `~/openclaw/skills` in your Claude Code skills configuration.
+3. Trigger skills in chat, for example:
+   - `Analyze Amazon product B08N5LNQCX`
+   - `Check my unread emails`
+   - `Send the report to xx@example.com`
+
+## Requirements
+
+- Common: `python3`, `bash`, `curl`
+- `imap-read-email`: `IMAP_PASSWORD`
+- `smtp-send-email`: `SMTP_USER`, `SMTP_PASSWORD`
+- `apify`: `APIFY_TOKEN` (required when using Apify actors)
+
+## Skill Index
+
+| Skill | Purpose | Typical Triggers |
+|---|---|---|
+| `amazon-insights` | Amazon product/category intelligence with HTML reports | `analyze amazon <ASIN>`, `category analysis` |
+| `imap-read-email` | Read, filter, and summarize IMAP emails | `check unread emails`, `summarize emails` |
+| `smtp-send-email` | Send emails and attachments via SMTP | `send email`, `send report` |
+| `apify` | Run Apify actors for scraping and data extraction | `run apify actor`, `scrape with apify` |
+
+## Featured Skills
+
+### `amazon-insights`
+
+End-to-end analysis from ASIN to visual report. Three modes:
 
 | Mode | Trigger | Output |
-|------|---------|--------|
-| **Single product** | 1 ASIN | Single-product HTML insight report |
-| **Batch** | 2–9 ASINs | Per-product reports + batch summary |
-| **Category overview** | 10+ ASINs / Excel file / "category analysis" | 9-section category-level HTML report |
+|---|---|---|
+| Single product | 1 ASIN | Single-product HTML report |
+| Batch | 2–9 ASINs | Per-product reports + summary |
+| Category overview | 10+ ASINs / Excel file / "category analysis" | 9-section category-level HTML report |
 
-Analytical frameworks: `PSPS` · `$APPEALS (8 dimensions)` · `KANO (5 categories)` · `ABSA aspect-level sentiment` · `Pain–Delight–Itch matrix` · `User journey map`
+Frameworks: `PSPS`, `$APPEALS (8 dimensions)`, `KANO (5 categories)`, `ABSA`, `Pain–Delight–Itch matrix`, `User journey map`.
 
----
-
-### 📨 imap-read-email — IMAP Email Reader
+### `imap-read-email`
 
 Read, filter, and summarize emails via IMAP.
 
 - Supports Gmail, Outlook, 163, QQ, and other standard IMAP providers
 - Flexible filtering by sender, subject, or date
-- Trigger phrases: "check inbox", "unread emails", "summarize emails"
-- Requires: `python3`, env var `IMAP_PASSWORD`
-
----
-
-### 📧 smtp-send-email — SMTP Email Sender
+ 
+### `smtp-send-email`
 
 Send emails and attachments via SMTP.
 
 - Supports CC, BCC, bulk send, HTML body, and file attachments
 - Works with 163 Mail and any standard SMTP provider
-- Trigger phrases: "send email", "send attachment", "email report"
-- Requires: `python3`, env vars `SMTP_USER` and `SMTP_PASSWORD`
+ 
+### `apify`
 
----
+- Run any Apify actor via REST API
+- Fetch dataset items, key-value outputs, and run logs
 
-## Skill Directory Structure
+## Skill Structure
 
-```
+```text
 <skill-name>/
-├── SKILL.md              # Skill descriptor (triggers, workflow, AI prompt entry points)
-├── scripts/              # Executable scripts (Shell / Python)
-├── references/           # Reference docs (config notes, API cheatsheets, report specs)
-└── assets/               # Static assets (optional)
+├── SKILL.md
+├── scripts/
+├── references/
+└── assets/   # optional
 ```
-
-## Getting Started
-
-1. Clone the repository:
-   ```bash
-   git clone https://gitee.com/miracle_1101/openclaw_skills_hub.git ~/openclaw/skills
-   ```
-
-2. Register the skills directory in your Claude Code configuration (see OpenClaw docs).
-
-3. Invoke skills using natural language in your session, for example:
-   - `Analyze Amazon product B08N5LNQCX`
-   - `Check my unread emails`
-   - `Send the report to xx@example.com`
 
 ## Contributing
 
 1. Fork the repository
-2. Create a branch: `feat/skill-name`
-3. Add `SKILL.md` + scripts following the existing skill structure
+2. Create a branch: `feat/<skill-name>`
+3. Add `SKILL.md` and scripts following the existing structure
 4. Submit a Pull Request
 
 ## License
 
-[MIT](LICENSE)
+[Apache License 2.0](LICENSE)
