@@ -6,9 +6,15 @@ generate-batch-summary.py — 生成50个ASIN汇总总览 HTML
 import json, os, sys
 from datetime import datetime
 
-STATUS_FILE = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser("~/.openclaw/workspace/batch/status.json")
-OUTPUT_FILE = sys.argv[2] if len(sys.argv) > 2 else os.path.expanduser("~/.openclaw/workspace/reports/batch-summary.html")
-REPORT_BASE = os.path.expanduser("~/.openclaw/workspace/reports")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from paths import get_paths, ensure_dirs
+
+_P = get_paths()
+ensure_dirs()
+
+STATUS_FILE = sys.argv[1] if len(sys.argv) > 1 else os.path.join(_P["batch"],   "status.json")
+OUTPUT_FILE = sys.argv[2] if len(sys.argv) > 2 else os.path.join(_P["reports"],  "batch-summary.html")
+REPORT_BASE = _P["reports"]
 
 d = json.load(open(STATUS_FILE)) if os.path.exists(STATUS_FILE) else {}
 total = len(d)
@@ -22,6 +28,7 @@ status_badge = {
     'pending_analysis': ('<span style="background:#e65100;color:#fff;padding:2px 8px;font-size:11px;">分析中</span>', '#fff8e1'),
     'scraping_product': ('<span style="background:#1565c0;color:#fff;padding:2px 8px;font-size:11px;">采集中</span>', '#e3f2fd'),
     'scraping_reviews': ('<span style="background:#1565c0;color:#fff;padding:2px 8px;font-size:11px;">爬评论</span>', '#e3f2fd'),
+    'need_browser':     ('<span style="background:#6a1b9a;color:#fff;padding:2px 8px;font-size:11px;">浏览器</span>', '#f3e5f5'),
 }
 
 def get_product_info(asin):
@@ -55,16 +62,45 @@ for i, (asin, v) in enumerate(sorted(d.items()), 1):
     price   = product.get('price') or '—'
     reviews = v.get('reviews') or '—'
     oppo    = get_opportunity(asin)
-    report_link = os.path.join(REPORT_BASE, asin, f"{asin}-report.html")
-    has_report  = os.path.exists(report_link)
-    img_html = f'<img src="{img_url}" style="width:48px;height:48px;object-fit:cover;border:1px solid #eee;" onerror="this.style.display=\'none\'">' if img_url else '<div style="width:48px;height:48px;background:#f5f5f5;"></div>'
-    link_html = f'<a href="{report_link}" target="_blank" style="color:#1565c0;font-size:12px;">查看报告 →</a>' if has_report else '<span style="color:#bbb;font-size:12px;">未生成</span>'
+    # 失败原因展示
+    failed_at   = v.get('failedAt', '')
+    failed_note = v.get('note', '')
+    fail_html   = ''
+    if st == 'failed':
+        step_label = {
+            'review_scrape':    '评论爬取失败',
+            'product_scrape':   '商品信息爬取失败',
+            'analysis':         'AI 分析失败',
+            'report_generate':  '报告生成失败',
+        }.get(failed_at, failed_at or '未知步骤')
+        fail_html = (
+            f'<div style="color:#b71c1c;font-size:11px;margin-top:4px;">'
+            f'⚠ {step_label}'
+            + (f'<br><span style="color:#888;">{failed_note[:60]}</span>' if failed_note else '')
+            + '</div>'
+        )
+
+    report_link   = os.path.join(REPORT_BASE, asin, f"{asin}-report.html")
+    fallback_link = os.path.join(REPORT_BASE, asin, f"{asin}-report-fallback.html")
+    has_report    = os.path.exists(report_link)
+    has_fallback  = os.path.exists(fallback_link)
+
+    img_html  = (f'<img src="{img_url}" style="width:48px;height:48px;object-fit:cover;'
+                 f'border:1px solid #eee;" onerror="this.style.display=\'none\'">'
+                 if img_url else '<div style="width:48px;height:48px;background:#f5f5f5;"></div>')
+
+    if has_report:
+        link_html = f'<a href="{report_link}" target="_blank" style="color:#1565c0;font-size:12px;">查看报告 →</a>'
+    elif has_fallback:
+        link_html = f'<a href="{fallback_link}" target="_blank" style="color:#e65100;font-size:12px;">降级报告 →</a>'
+    else:
+        link_html = '<span style="color:#bbb;font-size:12px;">未生成</span>'
 
     rows_html += f'''<tr style="background:{row_bg};">
       <td style="padding:10px 12px;font-size:13px;color:#888;">{i}</td>
       <td style="padding:10px 12px;">{img_html}</td>
       <td style="padding:10px 12px;font-weight:600;font-size:13px;font-family:monospace;">{asin}</td>
-      <td style="padding:10px 12px;font-size:13px;max-width:300px;">{title}</td>
+      <td style="padding:10px 12px;font-size:13px;max-width:280px;">{title}{fail_html}</td>
       <td style="padding:10px 12px;text-align:center;font-size:13px;">{badge}</td>
       <td style="padding:10px 12px;text-align:center;font-size:13px;font-weight:600;color:#e53935;">{rating}</td>
       <td style="padding:10px 12px;text-align:center;font-size:13px;">{price}</td>
@@ -73,7 +109,36 @@ for i, (asin, v) in enumerate(sorted(d.items()), 1):
       <td style="padding:10px 12px;">{link_html}</td>
     </tr>'''
 
-pct = int(done / total * 100) if total else 0
+pct         = int(done / total * 100) if total else 0
+failed_list = [(k, v) for k, v in d.items() if isinstance(v, dict) and v.get('status') == 'failed']
+summary_str = d.get('_summary', '')
+
+def _build_failed_block(fl):
+    if not fl:
+        return ''
+    items = []
+    for k, v in fl:
+        step = {
+            'review_scrape':   '评论爬取失败',
+            'product_scrape':  '商品信息失败',
+            'analysis':        'AI分析失败',
+            'report_generate': '报告生成失败',
+        }.get(v.get('failedAt', ''), v.get('failedAt', ''))
+        note = v.get('note', '')[:40]
+        item = '<span style="font-family:monospace;">' + k + '</span>'
+        if step:
+            item += ' [' + step
+            if note:
+                item += ' — ' + note
+            item += ']'
+        items.append(item)
+    return (
+        '<div style="margin-top:12px;background:#ffebee;border-left:4px solid #b71c1c;'
+        'padding:10px 14px;font-size:13px;line-height:1.8;">'
+        + '⚠️ ' + str(len(fl)) + ' 个 ASIN 失败（已跳过，不影响其他报告）：'
+        + '&nbsp;' + ',&nbsp;'.join(items)
+        + '</div>'
+    )
 
 html = f'''<!DOCTYPE html>
 <html lang="zh-CN">
@@ -122,6 +187,7 @@ html = f'''<!DOCTYPE html>
     <h2>进度总览</h2>
     <div style="font-size:13px;color:#888;">完成率 {pct}% ({done}/{total})</div>
     <div class="progress-bar"><div class="progress-fill"></div></div>
+    {_build_failed_block(failed_list)}
   </div>
 
   <div class="card">

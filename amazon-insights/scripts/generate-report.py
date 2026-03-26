@@ -16,6 +16,9 @@ generate-report.py — 生成标准化 HTML 商品洞察报告
 import json, sys, os
 from datetime import datetime
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from paths import get_paths, ensure_dirs
+
 def load(path):
     if not path or not os.path.exists(path):
         return {}
@@ -361,6 +364,8 @@ def main():
     generated_at = datetime.now().strftime('%Y-%m-%d %H:%M')
     html = generate_html(product, reviews_analysis, image_analysis, teardown, reviews_meta, generated_at)
 
+    _P = get_paths()
+    ensure_dirs()
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(html)
