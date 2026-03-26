@@ -5,541 +5,481 @@ description: 亚马逊商品洞察分析。支持两种模式：①单品/批量
 
 # Amazon Insights Skill
 
-## ⚡ 模式判断路由（入口，必须先执行）
+## 路径变量（跨平台，执行前必须先解析）
 
-拿到用户输入后，**第一步**判断走哪条路：
+所有路径通过 `scripts/paths.py` 统一解析，**不硬编码任何绝对路径**：
 
-| 输入类型 | 判断条件 | 执行路径 |
-|---------|---------|---------|
-| 单个 ASIN | 1个10位字母数字 | → **单品模式**（Step 1-5） |
-| 少量 ASIN | 2-9个 ASIN | → **批量模式**（Step 1-5 循环 + Step 6 汇总） |
-| 大批量 / 离线文件 | 10+个ASIN，或用户给了Excel/JSON文件路径，或说"品类分析/竞品总览/可视化报告" | → **品类总览模式**（Step 7） |
+```python
+import sys, os
+sys.path.insert(0, "{SKILL_SCRIPTS}")  # 由 AI 替换为实际 scripts/ 目录
+from paths import get_paths, ensure_dirs
+P = ensure_dirs("{ASIN}")   # 自动创建所有必要目录
 
-**判断优先级**：文件路径 > ASIN数量 > 关键词
+# 之后使用：
+# P["workspace"]  — OpenClaw 工作目录
+# P["reports"]    — 报告根目录
+# P["batch"]      — 批量任务目录
+# P["memory"]     — 状态/记忆文件目录
+# P["scripts"]    — skill scripts 目录
+# P["report_dir"] — 当前 ASIN 报告目录
+```
+
+平台自动推导规则：
+| 平台 | workspace 默认路径 |
+|------|-------------------|
+| Mac / Linux | `~/.openclaw/workspace` |
+| Windows | `%APPDATA%\openclaw\workspace` |
+
+自定义路径：设置环境变量 `OPENCLAW_WORKSPACE` / `OPENCLAW_SKILL_DIR` 覆盖默认值。
+
+**bash 脚本中获取路径：**
+```bash
+SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_PATHS=$(python3 "${SCRIPTS_DIR}/paths.py" "${ASIN}")
+REPORT_DIR=$(echo "$_PATHS" | python3 -c "import json,sys; print(json.load(sys.stdin)['report_dir'])")
+```
 
 ---
 
-## 分析专家角色总览
+## 设计原则
 
-详细提示词见 `references/analysis-prompts.md`。
-方法论框架：**PSPS 模型 · $APPEALS（8维）· KANO（5类+量化）· 用户旅程地图 · ABSA方面级情感分析 · 痛爽痒矩阵**
-
-| 角色 | 输入 | 输出 | 时机 |
-|---|---|---|---|
-| ① 商品图视觉分析 | 详情图URL(前5张) | 视觉审计报告 + 战略解码 | 拿到图片后，与②并行 |
-| ② 需求分析师(VOC) | 差评原文(已翻译) | PSPS+ABSA+$APPEALS(8维)+KANO(5类)+痛爽痒 结构化JSON | 评论到手后立即执行 |
-| ③ 单品拆解专家 | 商品数据+②结论 | must_copy/must_avoid/conclusion | ①完成后执行 |
-| ④ 竞品可视化拆解 | 图片+①②结论 | 视觉战术文字报告 | ①②均完成后 |
-| ⑤ 市场分析师 | 多竞品数据 | 市场机会报告 | 多ASIN或明确要求时 |
-| ⑥ 产品企划总监 | 前面所有结论 | 产品定义+视觉企划 | 选品建议/产品优化时 |
-| ⑦ 用户旅程分析师 | 评论数据+②结论 | 6阶段旅程摩擦热力图+峰终洞察 JSON | ②完成后触发 |
-
-**单 ASIN 默认执行**：① + ② + ③ + ④ + ⑦
-**多 ASIN / 批量**：额外执行 ⑤
-**选品建议**：额外执行 ⑥
+- **AI 是分析师，不是 RPA**：AI 直接用 browser 工具抓数据、判断策略、灵活应对异常
+- **脚本只做渲染**：固定脚本只负责把 AI 产出的结构化数据渲染成 HTML，不承担采集逻辑
+- **写→验→修→继续**：AI 写任何代码都必须立即验证，有错自己修，不跳过不降级放弃
+- **流式输出**：不等所有数据，拿到多少输出多少，用户实时看到进展
 
 ---
 
-## ═══════════════════════════════════
-## 单品 / 批量模式（Step 1-6）
-## ═══════════════════════════════════
+## 模式判断（入口）
 
-### Step 1：解析输入
+| 输入 | 模式 |
+|------|------|
+| 1–9 个 ASIN | 单品/批量模式 → 执行 Phase 1–5 |
+| 10+ 个 ASIN / Excel 文件 / "品类分析/竞品总览" | 品类总览模式 → 执行 Phase 6–7 |
+
+---
+
+## 单品 / 批量模式
+
+### Phase 0：解析输入
 
 从用户输入提取：
-- **ASIN**：10位字母数字，支持多个（逗号/空格/换行分隔）
-- **站点**：参考 `references/domain-map.md`，默认 `amazon.com`
-- **评论数**：用户指定则用指定值，否则默认 `200`；上限 1000
-- **模式**：单品分析 / 批量分析 / 市场分析 / 选品建议
+- **ASIN**：10位字母数字，多个用逗号/空格/换行分隔
+- **站点**：见 `references/domain-map.md`，默认 `amazon.com`
+- **意图**：
 
-**批量模式判断**：用户提供 2+ ASIN 或说"批量"→ 写入 `~/.openclaw/workspace/batch/queue.txt`，运行 `batch-run.sh`
+| 用户说 | intent |
+|--------|--------|
+| 快速看/扫一眼/简单看 | `quick` |
+| 默认不说 | `standard` |
+| 深度/详细/完整分析 | `deep` |
+| 多 ASIN / 批量 | `batch` |
+
+批量模式（2+ ASIN）：写入 `{P['batch']}/queue.txt`，串行处理每个 ASIN。
 
 ---
 
-### Step 2：并行采集（线程A + 线程B 同时启动）
+### Phase 1：采集商品信息（browser 工具直接执行）
 
+**不走 scrape-product.sh**，AI 直接用 browser 工具：
+
+```
+1. browser open: https://www.{domain}/dp/{ASIN}
+2. browser act: wait domcontentloaded
+3. browser act: evaluate 提取结构化数据
+```
+
+提取 JS：
+```javascript
+() => {
+  const title      = document.querySelector('#productTitle')?.textContent?.trim() || '';
+  const price      = document.querySelector('.a-price-whole')?.textContent?.trim() || '';
+  const rating     = document.querySelector('#acrPopover')?.getAttribute('title')?.match(/[\d.]+/)?.[0] || '';
+  const reviewCount= document.querySelector('#acrCustomerReviewText')?.textContent?.trim() || '';
+  const bullets    = Array.from(document.querySelectorAll('#feature-bullets .a-list-item'))
+                       .map(e=>e.textContent.trim()).filter(t=>t.length>10).slice(0,5);
+  const images     = Array.from(document.querySelectorAll('#altImages img'))
+                       .map(i=>(i.dataset.oldHires||i.src).replace(/\._[A-Z0-9_,]+_\./,'._SL500_.'))
+                       .filter(u=>u.includes('media-amazon')).slice(0,8);
+  const apluses    = Array.from(document.querySelectorAll('#aplus img, #aplus_feature_div img'))
+                       .map(i=>i.src).filter(u=>u.includes('media-amazon')).slice(0,5);
+  return JSON.stringify({title,price,rating,reviewCount,bullets,images,apluses});
+}
+```
+
+**拿到数据后立即输出商品卡片到聊天框**（不等评论）：
+```
+📦 {TITLE}
+💰 ${PRICE}  ⭐ {RATING}（{REVIEW_COUNT} 条评论）
+🔗 https://www.{domain}/dp/{ASIN}
+```
+
+遇到反爬/空数据：
+- 刷新重试一次
+- 仍失败 → 尝试 `amazon.co.uk` 同 ASIN
+- 告知用户并继续后续流程（不卡死）
+
+保存到：`{P["report_dir"]}/{ASIN}-product.json`
+
+---
+
+### Phase 2：评论采集策略决策
+
+**AI 自己判断**，不走固定脚本流程：
+
+**Step A：计算目标量**
+
+从 Phase 1 拿到的 `reviewCount` 解析总评论数，套公式：
+
+| 总评论数 | 基础目标 |
+|---------|---------|
+| < 200 | 全采（上限200） |
+| 200–2000 | 20%，最少50条 |
+| 2000–10000 | 10%，最少100条 |
+| > 10000 | 5%，最少150，上限500 |
+
+意图修正：quick×0.3 / standard×1.0 / deep×2.0 / batch×0.5
+最终结果 clamp 到 [20, 1000]。
+
+**Step B：选择采集方式**
+
+检查 Apify token 冷却状态：
 ```bash
-bash ~/openclaw/skills/amazon-insights/scripts/run-pipeline.sh <ASIN> <domain> <max_reviews>
+python3 -c "
+import json,os,time
+f=os.path.join(P['memory'],'apify-token-state.json')
+d=json.load(open(f)) if os.path.exists(f) else {}
+ex=d.get('exhausted_at',0)
+hrs=(time.time()-ex)/3600
+print('cooldown' if hrs<4 else 'available')
+"
 ```
 
-**线程A：商品基础信息**
+| 状态 | 策略 |
+|------|------|
+| available | 先试 Apify（bash apify-reviews.sh），失败直接切浏览器 |
+| cooldown | 跳过 Apify，直接浏览器翻页 |
+
+---
+
+### Phase 3：评论采集执行
+
+**Apify 路径**（available 时）：
 ```bash
-bash ~/openclaw/skills/amazon-insights/scripts/scrape-product.sh <ASIN> <domain>
+bash {P["scripts"]}/apify-reviews.sh {ASIN} {domain} {target}
 ```
-完成后：立即流式输出商品卡片到聊天框，触发 ① 图片视觉分析 + ③ 单品拆解（并行）
+- 成功且 >= 20 条 → 进 Phase 4
+- 失败/超时/0条 → 立即切浏览器，记录 `exhausted_at`
 
-**线程B：评论爬取（三级降级链 + 自动站点切换）**
+**浏览器翻页路径**：
+
+AI 直接用 browser 工具逐页抓取，URL 模板：
 ```
-Level 1: Apify（90s 硬超时）
-    ↓ 0条 / 超时 / 失败
-Level 2: 浏览器自动化翻页
-    ├─ 登录检测 → 已登录直接翻页 / 未登录提示用户
-    ├─ 翻页循环：while 已采集 < 目标数 and hasNext
-    └─ 采集结果 < 100 → 触发自动站点切换
-Level 3: 自动站点切换
-    切换顺序: amazon.com → amazon.co.uk → amazon.de → amazon.co.jp
-    各站结果合并去重（按 title+body 前50字）
-    全部站点合计 < 100 → 标注说明，继续分析
+https://www.{domain}/product-reviews/{ASIN}?filterByStar=critical&sortBy=recent&pageNumber={n}
 ```
 
-**Level 2 翻页 JS：**
+每页提取 JS：
 ```javascript
 () => {
   const reviews = [];
   document.querySelectorAll('[data-hook="review"]').forEach(el => {
-    const ratingRaw = el.querySelector('[data-hook="review-star-rating"] .a-icon-alt')?.textContent || '';
-    const ratingNum = parseFloat(ratingRaw.split(' ')[0]) || 0;
-    if (ratingNum <= 3 && ratingNum > 0) {
+    const ratingEl  = el.querySelector('[data-hook="review-star-rating"] .a-icon-alt');
+    const ratingNum = parseFloat((ratingEl?.textContent||'').split(' ')[0]) || 0;
+    if (ratingNum > 0 && ratingNum <= 3) {
       reviews.push({
-        rating: ratingNum,
-        title:  el.querySelector('[data-hook="review-title"] span:not(.a-icon-alt)')?.textContent?.trim() || '',
-        body:   el.querySelector('[data-hook="review-body"] span')?.textContent?.trim() || '',
-        date:   el.querySelector('[data-hook="review-date"]')?.textContent?.trim() || '',
+        rating:   ratingNum,
+        title:    el.querySelector('[data-hook="review-title"] span:not(.a-icon-alt)')?.textContent?.trim() || '',
+        body:     el.querySelector('[data-hook="review-body"] span')?.textContent?.trim() || '',
+        date:     el.querySelector('[data-hook="review-date"]')?.textContent?.trim() || '',
         verified: !!el.querySelector('[data-hook="avp-badge"]')
       });
     }
   });
-  const nextBtn = document.querySelector('li.a-last:not(.a-disabled) a');
-  return JSON.stringify({ reviews, hasNext: !!nextBtn });
+  const hasNext = !!document.querySelector('li.a-last:not(.a-disabled) a');
+  return JSON.stringify({reviews, hasNext});
 }
 ```
-循环条件：`hasNext == true AND 已采集 < max_reviews AND 页数 < 100`
+
+**硬出口（任意触发立即停止）**：
+- ✅ 已采集 >= 目标数
+- 🔄 连续3页无新数据
+- ⛔ hasNext=false 且已采集 >= 20 条
+- ⏰ 翻页超过15页（Amazon 通常最多允许10页）
+
+不足20条时自动切换站点（顺序：.co.uk → .de → .co.jp），每站最多3页，切完就停，不再等待。
+
+**每采集10条输出一次进度**：
+```
+📥 已采集 {n} 条差评，目标 {target} 条...
+```
+
+保存到：`{P["report_dir"]}/{ASIN}-reviews-raw.json`
 
 ---
 
-### Step 3：分析层（流式推送）
+### Phase 4：AI 分析（流式输出）
 
-> 每个专家分析完立即输出一段到聊天框，不等全部完成
+评论够20条即可开始分析，不等满。
 
-**① 商品图视觉分析**（线程A完成后）：读 `references/analysis-prompts.md` 第1节，输入前5张图，完成后推送视觉摘要
+提示词在 `references/analysis-prompts.md`，按以下顺序并行执行：
 
-**② 需求分析师 VOC**（线程B完成后）：读第3节，非中文评论先翻译（第7节，50条/批），3星评论完整保留（含正面内容供爽点/痒点提取），输出结构化 JSON：`psps` / `absa` / `keywords` / `appeals` / `kano` / `pain_pleasure_itch` / `opportunity` / `radar_expect` / `radar_actual` / `sample_reviews`
+**① 视觉分析**（Phase 1 完成后立即触发，不等评论）
+- 输入：apluses 前5张图片
+- 提示词：`references/analysis-prompts.md` 第1节
+- 完成后立即输出视觉摘要
 
-**③ 单品拆解专家**（①完成后）：读第4节，输出 `teardown.must_copy` / `must_avoid` / `conclusion` / `identity_tag`
+**② VOC 需求分析**（评论到手后触发）
+- 非中文评论先翻译（`references/analysis-prompts.md` 第7节，50条/批）
+- 输入：全部差评
+- 提示词：第3节（PSPS + ABSA + $APPEALS + KANO + 痛爽痒）
+- 输出结构化 JSON 到内存
 
-**④ 竞品可视化拆解**（①②均完成后）：读第5节，输出文字报告嵌入最终 HTML
+**③ 单品拆解**（①完成后触发）
+- 提示词：第4节
+- 完成后立即输出 Must Copy / Must Avoid
 
-**⑦ 用户旅程分析师**（②完成后，与③④并行）：读第8节，输出 `journey_map`（6阶段）/ `top3_friction_stages` / `peak_end_insight` / `journey_optimization_actions`
+**④ 用户旅程**（②完成后触发）
+- 提示词：第8节
+- 输出6阶段摩擦热力图
 
----
-
-### Step 4：整合数据
-
-组装 `$REPORT_DIR/<ASIN>-data.json`（结构详见 `references/report-spec.md`）
-
----
-
-### Step 5：生成单品报告（7模块）
-
-```bash
-python3 ~/openclaw/skills/amazon-insights/scripts/generate-report.py \
-  <ASIN>-product.json <ASIN>-report.html <ASIN>-data.json
+**流式输出节奏**：
 ```
-
-**报告固定结构：**
-1. Header（ASIN + 站点 + 生成时间 + 身份标签）
-2. 基础信息（标题/价格/评分/五点/主图）
-3. 详情图 & 视觉分析
-4. 差评分析（采集说明 + 关键词 + APPEALS玫瑰图 + KANO表格 + 雷达图 + 机会点）
-5. 单品拆解（Must Copy / Must Avoid / 结论）
-6. 差评原声剧场（最多9条）
-7. Footer
-
-**验证**：HTML < 50KB 视为失败，重新执行
-
-**流式输出顺序：**
-```
-T+30s  → 商品卡片（标题/价格/评分）
-T+50s  → 视觉分析摘要
-T+60s  → 单品拆解结论
-T+90s  → VOC差评摘要（PSPS + 痛爽痒强度 + ABSA危机预警）
-T+110s → 旅程摩擦热力图摘要
-T+150s → 最终报告路径 + Canvas展示
+T+15s  商品卡片（Phase 1 完成）
+T+40s  视觉分析摘要
+T+60s  VOC 核心痛点 Top3 + PSPS 画像
+T+90s  KANO / $APPEALS 结论
+T+110s Must Copy / Must Avoid
+T+130s 用户旅程摩擦点
+T+150s "报告生成中..."
 ```
 
 ---
 
-### Step 6：批量模式
+### Phase 5：生成报告
 
-```bash
-bash ~/openclaw/skills/amazon-insights/scripts/batch-run.sh
-bash ~/openclaw/skills/amazon-insights/scripts/batch-status.sh
-python3 ~/openclaw/skills/amazon-insights/scripts/generate-batch-summary.py
-```
-
-汇总报告：`~/.openclaw/workspace/reports/batch-summary.html`（进度条 + KPI + ASIN明细表 + 报告链接，每60秒自动刷新）
-
----
-
-### 评论采集规范
-
-| 参数 | 规则 |
-|------|------|
-| 星级 | 3星及以下 |
-| 最少数量 | **100条**（硬门槛） |
-| 上限 | **1000条** |
-| 默认目标 | 200条 |
-| 不足处理 | 自动切换站点，全部失败输出⚠️说明继续分析 |
-
----
-
-### 错误处理（单品/批量）
-
-| 情况 | 处理 |
-|------|------|
-| 商品爬取失败 | 降级用 browser 工具抓取，标注来源 |
-| 所有站点评论 < 100 | 报告第4模块顶部输出⚠️说明，继续分析 |
-| Apify token 耗尽 | 静默切 Level 2，不中断流程 |
-| 评论 < 20 条 | 标注"差评极少，分析仅供参考" |
-| HTML < 50KB | 视为失败，重新执行 generate-report.py |
-| 批量某个 ASIN 失败 | 记录 failed 状态，跳过继续下一个 |
-
----
-
-### 存档结构
-
-```
-~/.openclaw/workspace/
-├── batch/
-│   ├── queue.txt
-│   ├── status.json
-│   └── batch-*.log
-└── reports/
-    ├── batch-summary.html
-    └── <ASIN>/
-        ├── <ASIN>-product.json
-        ├── <ASIN>-reviews-raw.json
-        ├── <ASIN>-reviews-meta.json
-        ├── <ASIN>-data.json
-        └── <ASIN>-report.html
-```
-
-
----
-
-
-## ═══════════════════════════════════
-## Step 7：品类总览模式（离线文件 / 10+ASIN）
-## ═══════════════════════════════════
-
-> 触发条件：用户给了 Excel/JSON 离线文件，或 10+个ASIN，或说"品类分析/竞品总览/可视化报告"
-> 输出：单文件 HTML 品类洞察报告，路径：{用户指定目录}/report-PSPS-{YYYYMMDD-HHMMSS}.html
-
-### ⚠️ 执行前强制检查（防止 run error: terminated）
-
-1. 所有 Python 脚本必须先用 `cat > /tmp/xxx.py << 'PYEOF'` 写入文件，再用 `python3 /tmp/xxx.py` 执行
-2. 单次 `cat >>` 追加内容不超过 150 行
-3. 数据处理脚本（gen_report_data.py）与 HTML 生成脚本（build_report.py）必须分离
-4. 禁止在单次 exec 中直接传入超过 100 行 Python 字符串
-5. 禁止用子代理生成 HTML（5分钟超时不够，主会话分段执行最稳定）
-
-
-### Step 7.1：识别输入数据
-
-```
-输入类型判断：
-├─ Excel 文件（.xlsx）→ 用 openpyxl 读取
-│   ├─ Sheet1「商品主数据」：ASIN / 视觉AI分析 / Title / Price / MainImage / AllImages / Rating / ReviewCount
-│   └─ Sheet2「评论数据」：aspects / reviewsAISummary / ASIN / rating / reviewText / ... (30列)
-├─ JSON 目录 → 读取各 <ASIN>-data.json 文件
-└─ 纯 ASIN 列表（10+）→ 先走单品批量爬取，完成后进入 Step 7.2
-```
-
-**Excel 标准路径约定**（用户未指定时询问）：
-- 数据文件：`{用户目录}/{品类名}商品主数据+图片理解+评论数据.xlsx`
-- 输出报告：`{用户目录}/report-PSPS-{YYYYMMDD-HHMMSS}.html`
-
-
-### Step 7.2：数据处理脚本（gen_report_data.py）
-
-**职责**：读原始数据 → 计算聚合 → 输出 `/tmp/report_data.json`
-**验证**：运行后检查 `absa`、`asinDetails`、`productTable` 字段是否非空
-
-**标准输出结构**：
+**组装 data.json**：
 ```json
 {
-  "meta": { "totalProducts": 52, "avgRating": 4.36, "totalReviews": 855, "negRate": 12.9 },
-  "priceDist":    { "$0-20": 7, "$20-40": 15, "$40-60": 4, "$60-80": 5, "$80+": 21 },
-  "ratingDist":   { "1": 0, "2": 0, "3": 2, "4": 31, "5": 16 },
-  "productTable": [{ "asin":"", "title":"", "price":"", "rating":0, "reviewCount":0, "negCount":0 }],
-  "personaWords": { "kids": 515, "child": 169, ... },
-  "scenarioTop10": [["gift", 182], ["learning", 128], ...],
-  "painTop5":      [["battery", 31], ["waste", 13], ...],
-  "absaList": [{ "name":"Functionality", "positive":140, "negative":160, "mixed":160, "neutral":0, "total":460, "negRatio":0.696 }],
-  "appealsData": {
-    "Price":       { "negTotal": 220, "top3": [{"aspect":"Value for money","negCount":220}] },
-    "Performance": { "negTotal": 540, "top3": [...] }
-  },
-  "kanoList": [{ "aspect":"", "type":"Must-be", "label":"基础型", "color":"#f44336", "total":0, "posRatio":0, "negRatio":0, "strategy":"" }],
-  "painData": [{ "kw":"doesn't work", "count":45, "example":"..." }],
-  "joyData":  [{ "kw":"love it", "count":234, "example":"..." }],
-  "itchData": [{ "kw":"educational", "count":89, "example":"..." }],
-  "journeyData":  { "认知/搜索": 13, "购买决策": 33, "配送开箱": 8, "首次使用": 55, "长期使用": 13, "售后客服": 24 },
-  "journeyTop3":  { "首次使用": ["example1", "example2"] },
-  "asinDetails": [{
-    "asin":"", "title":"", "price":"", "rating":0, "reviewCount":0,
-    "mainImage":"", "visualSummary":"", "aiSummary":"",
-    "aspects": [{ "name":"Fun", "positive":20, "negative":5, "mixed":3, "neutral":2 }],
-    "negExcerpts": ["评论原文前150字"]
-  }]
+  "product":          {},
+  "reviews_analysis": {},
+  "image_analysis":   "",
+  "teardown":         {},
+  "reviews_meta":     {"total": 0, "status": "done|partial|insufficient", "note": ""},
+  "journey_map":      {}
 }
 ```
 
+**生成 HTML**：
+```bash
+python3 {P["scripts"]}/generate-report.py \
+  {ASIN}-product.json {ASIN}-report.html {ASIN}-data.json
+```
 
-### Step 7.3：已知字段映射（必读，防止数据解析错误）
+**验证**：
+```bash
+python3 {P["scripts"]}/validate-report.py \
+  {ASIN}-report.html --type single --data {ASIN}-data.json
+```
 
-**⚠️ aspects 字段关键陷阱**：情感字段名是 `aspectSentiment`，不是 `sentiment`
+验证失败时：
+- AI 读报错信息，定位问题
+- 修复 data.json 或重新调用 generate-report.py
+- 不降级生成 fallback，先尝试修复
+- 修复2次仍失败 → 输出 fallback 文字版，告知用户
 
+**Canvas 展示**：
+```
+canvas present url: file://{ASIN}-report.html
+```
+
+---
+
+### 异常处理原则
+
+| 情况 | 处理方式 |
+|------|---------|
+| 商品页反爬 | 刷新重试，换站点，不卡死 |
+| Apify 额度耗尽 | 记录 exhausted_at，静默切浏览器 |
+| 评论 < 20 条 | 标注"差评极少"，继续分析 |
+| 报告生成失败 | AI 读错误自己修，修2次失败输出文字版 |
+| 任何脚本报错 | AI 读 stderr，定位原因，能修就修，不能修就告诉用户 |
+
+**用户感知到的异常提示**（措辞参考）：
+- 评论不足：「该商品差评较少（共X条），分析基于现有数据，结论供参考」
+- 采集受限：「Amazon 限制了翻页，已采集X条，基于现有数据分析...」
+- 报告问题：「报告生成遇到小问题，正在修复...」
+
+---
+
+## AI 写代码规范（必须遵守）
+
+### 写→验→修→继续
+
+```bash
+# 1. 分段写入（每段 ≤ 100 行）
+cat > /tmp/script.py << 'EOF'
+# 第一段
+EOF
+cat >> /tmp/script.py << 'EOF'
+# 第二段（如有）
+EOF
+
+# 2. 立即验证（写完所有段后）
+python3 -m py_compile /tmp/script.py && echo "✅ OK" || echo "❌ 有错误，停止执行"
+
+# 3. 有错误：读报错，定位行号，原地修复，重新验证
+# 4. 通过后执行
+python3 /tmp/script.py
+```
+
+### 高频错误预防
+
+```python
+# ❌ f-string 内嵌同类引号
+html = f'<div>{d["key"]}</div>'
+# ✅ 改用拼接
+html = '<div>' + d["key"] + '</div>'
+
+# ❌ onerror 引号冲突
+'<img onerror="this.style.display="none"">'
+# ✅ 用转义
+'<img onerror="this.style.display=\'none\'">'
+
+# ❌ Amazon aspects 字段名猜测
+item.get('sentiment')
+# ✅ 正确字段名
+item.get('aspectSentiment')
+```
+
+### exec 大小自判断
+
+- ≤ 100 行：一次写完
+- 100–300 行：主动拆 2–3 段
+- > 300 行：拆 4+ 段，或复用已有脚本
+
+---
+
+## 品类总览模式（Phase 6–7）
+
+> 触发：10+ ASIN / Excel 文件 / "品类分析/竞品总览"
+> 输出：`report-PSPS-{YYYYMMDD-HHMMSS}.html`
+
+### Phase 6：数据加载
+
+```
+Excel 文件 → openpyxl 读取
+  Sheet1「商品主数据」：ASIN/Title/Price/Rating/ReviewCount/MainImage/AllImages/视觉AI分析
+  Sheet2「评论数据」：ASIN/rating/reviewText/aspects/reviewsAISummary（30列）
+
+JSON 目录 → 读取各 {ASIN}-data.json
+
+纯 ASIN 列表 → 先走单品批量流程，完成后进 Phase 7
+```
+
+**aspects 字段解析（关键，字段名是 aspectSentiment）**：
 ```python
 import ast, re
 
-def parse_aspects(aspect_str):
-    """解析 aspects 字段 - 情感字段为 aspectSentiment（非 sentiment）"""
-    if not aspect_str or str(aspect_str) == 'None':
+def parse_aspects(s):
+    if not s or str(s) == 'None':
         return []
     try:
-        result = ast.literal_eval(str(aspect_str))
+        result = ast.literal_eval(str(s))
         if isinstance(result, list):
-            return [
-                {
-                    'aspectName': item.get('aspectName', ''),
-                    'sentiment':  item.get('aspectSentiment', item.get('sentiment', ''))
-                }
-                for item in result if isinstance(item, dict) and item.get('aspectName')
-            ]
+            return [{'aspectName': i.get('aspectName',''),
+                     'sentiment':  i.get('aspectSentiment', i.get('sentiment',''))}
+                    for i in result if isinstance(i, dict)]
     except:
         pass
-    # 降级：正则提取
     matches = re.findall(
         r"'aspectName'\s*:\s*'([^']+)'.*?'aspectSentiment'\s*:\s*'([^']+)'",
-        str(aspect_str)
-    )
+        str(s))
     return [{'aspectName': m[0], 'sentiment': m[1]} for m in matches]
 ```
 
-**Excel 字段名对照表**：
+### Phase 7：数据处理
 
-| 用途 | 实际字段名 | 注意 |
-|------|-----------|------|
-| aspect 情感 | `aspectSentiment` | ⚠️ 非 sentiment |
-| aspect 名称 | `aspectName` | 正常 |
-| 评论正文 | `reviewText` | 正常 |
-| 评论星级 | `rating` | 用 float() 转换 |
-| AI评论总结 | `reviewsAISummary` | 多条评论共享同值，取第一条非空 |
-| 视觉AI分析 | `视觉AI分析` | 用正则提取"一句话战略：(.+)" |
+AI 编写 gen_report_data.py 生成 `/tmp/report_data.json`，遵守写→验→修→继续规范。
 
+输出结构：
+```json
+{
+  "meta":         {"totalProducts":0,"avgRating":0,"totalReviews":0,"negRate":0},
+  "priceDist":    {},
+  "ratingDist":   {},
+  "productTable": [],
+  "personaWords": {},
+  "scenarioTop10":[],
+  "painTop5":     [],
+  "absaList":     [],
+  "appealsData":  {},
+  "kanoList":     [],
+  "painData":     [],
+  "joyData":      [],
+  "itchData":     [],
+  "journeyData":  {},
+  "journeyTop3":  {},
+  "asinDetails":  []
+}
+```
 
-### Step 7.4：HTML 生成脚本（build_report.py）
+验证：`absa`、`asinDetails`、`productTable` 字段非空。
 
-**职责**：读 `/tmp/report_data.json` → 调用 LLM 生成 AI 总结 → 拼接完整 HTML → 写出文件
-**验证**：文件大小 > 100KB；结构检查所有9个 `<h2>` 标题存在；ASIN 折叠卡片数量 = 商品总数
+### Phase 8：品类报告生成
 
-**分段写入执行模板**（严格按此执行，每段 ≤ 150 行）：
 ```bash
-# 段1：初始化
-cat > /tmp/build_report.py << 'PYEOF'
-# 初始化代码（imports + 读数据 + 变量）
-PYEOF
-
-# 段2：HEAD + CSS
-cat >> /tmp/build_report.py << 'PYEOF'
-# HTML head 和 CSS
-PYEOF
-
-# 段3：第0部分 Dashboard
-cat >> /tmp/build_report.py << 'PYEOF'
-PYEOF
-
-# 段4：AI总结调用 + 插入
-cat >> /tmp/build_report.py << 'PYEOF'
-PYEOF
-
-# 段5：第1-2部分
-cat >> /tmp/build_report.py << 'PYEOF'
-PYEOF
-
-# 段6：第3-4部分
-cat >> /tmp/build_report.py << 'PYEOF'
-PYEOF
-
-# 段7：第5-6部分
-cat >> /tmp/build_report.py << 'PYEOF'
-PYEOF
-
-# 段8：第7部分 ASIN拆解
-cat >> /tmp/build_report.py << 'PYEOF'
-PYEOF
-
-# 段9：JS初始化 + 写文件
-cat >> /tmp/build_report.py << 'PYEOF'
-PYEOF
-
-# 统一运行
-python3 /tmp/build_report.py
+python3 {P["scripts"]}/generate-category.py \
+  /tmp/report_data.json {output}.html
 ```
 
-**f-string 内嵌引号冲突处理**（必须遵守）：
-```python
-# ❌ 错误：f-string 内不能再用同类引号
-parts.append(f"<div>"{var}"</div>")
+> ⚠️ generate-category.py 尚未创建，AI 需先检查是否存在：
+> - 存在 → 直接调用
+> - 不存在 → 按写→验→修→继续规范编写，完成后保存到 scripts/ 目录
 
-# ✅ 正确：改用字符串拼接
-parts.append("<div>&ldquo;" + var + "&rdquo;</div>")
+报告固定结构（9部分）：第0部分Dashboard / AI总结 / PSPS / ABSA / $APPEALS / KANO / 痛爽痒 / 用户旅程 / ASIN拆解
 
-# ✅ 正确：HTML 属性用单引号，外层用双引号
-block = '<img src="' + img + '" onerror="this.style.display=\'none\'">'
+视觉规范：`references/report-spec.md`
+
+验证：
+```bash
+python3 {P["scripts"]}/validate-report.py \
+  {output}.html --type category --data /tmp/report_data.json
 ```
 
+---
 
-### Step 7.5：品类总览报告固定结构（严格按序，不可缺省）
+## 存档结构
 
-| 编号 | 部分名称 | 数据字段 | 图表 |
-|------|---------|---------|------|
-| 第0部分 | 品类总览 Dashboard | meta / priceDist / ratingDist / productTable | KPI×4 + 柱状图 + 饼图 + 总览表 |
-| 总结部分 | 品类总体分析总结（AI生成） | ai_summary_input.json | 5卡片文字布局 |
-| 第1部分 | PSPS 用户画像 | personaWords / scenarioTop10 / painTop5 | 横向条形图×3 |
-| 第2部分 | ABSA 方面级情感分析 | absaList | 水平堆叠条形图 |
-| 第3部分 | $APPEALS 8维竞争力 | appealsData | 南丁格尔玫瑰图 + 列表 |
-| 第4部分 | KANO 需求分类 | kanoList | CSS 彩色表格 |
-| 第5部分 | 痛爽痒三维图谱 | painData / joyData / itchData | 三列卡片 |
-| 第6部分 | 用户旅程摩擦分析 | journeyData / journeyTop3 | 折线图 + 摩擦卡片 |
-| 第7部分 | 逐品 ASIN 拆解 | asinDetails | details折叠卡片×N |
-
-**KANO 分类逻辑**：
-- Must-be（基础型）：负面占比 > 60%
-- Performance（期望型）：负面占比 30-60%
-- Attractive（魅力型）：正面占比 > 80% 且出现次数 > 10
-- Indifferent（无差异型）：出现次数 < 5
-- Reverse（反向型）：正面和负面都 > 30%
-
-**$APPEALS 8维映射**：
-- Price → Value for money / Price / Affordability
-- Availability → Shipping / Delivery / Availability
-- Packaging → Packaging / Design / Appearance
-- Performance → Quality / Functionality / Performance / Durability
-- Ease → Ease of use / Setup / Instructions
-- Assurances → Customer service / Return / Warranty / Support
-- LifeCycle → Durability / Battery / Long-term
-- Social → Gift value / Educational value / Fun / Interactiveness
-
-
-### Step 7.6：AI 总结动态生成规范
-
-**触发时机**：build_report.py 执行时，写第0部分之后、第1部分之前调用
-
-**输入数据提炼**（写入 /tmp/ai_summary_input.json）：
-```python
-summary_input = {
-    "meta": D['meta'],
-    "priceDist": D['priceDist'],
-    "topPersona": list(D['personaWords'].items())[:8],
-    "topScenario": D['scenarioTop10'][:5],
-    "crisisAspects": [a for a in D['absaList'] if a['negRatio'] > 0.5][:5],
-    "attractiveKano": [k for k in D['kanoList'] if k['type'] == 'Attractive'][:3],
-    "topPain": D['painTop5'],
-    "topJourney": sorted(D['journeyData'].items(), key=lambda x:-x[1])[:3],
-    "appealsTopNeg": sorted(D['appealsData'].items(), key=lambda x:-x[1]['negTotal'])[:4]
-}
-```
-
-**LLM 调用**（读取本机已配置的 LiteLLM 接口）：
-```python
-import json, urllib.request
-with open('/Users/macmini/.openclaw/openclaw.json') as f:
-    cfg = json.load(f)
-litellm = cfg['models']['providers']['litellm']
-payload = json.dumps({
-    "model": "claude-sonnet-4-6",
-    "messages": [{"role": "user", "content": PROMPT}],
-    "max_tokens": 2000, "temperature": 0.3
-}).encode('utf-8')
-req = urllib.request.Request(
-    litellm['baseUrl'] + '/v1/chat/completions',
-    data=payload,
-    headers={"Content-Type":"application/json","Authorization":"Bearer "+litellm['apiKey']}
-)
-with urllib.request.urlopen(req, timeout=60) as resp:
-    ai_html = json.loads(resp.read())['choices'][0]['message']['content'].strip()
-# 去除可能的 markdown 包裹
-if ai_html.startswith('```'): ai_html = '\n'.join(ai_html.split('\n')[1:])
-if ai_html.endswith('```'):   ai_html = '\n'.join(ai_html.split('\n')[:-1])
-```
-
-**Prompt 模板**（已验证可用）：
-```
-你是资深亚马逊品类分析师。基于以下数据为"{品类名}"品类生成【品类总体分析总结】HTML片段。
-
-数据：{summary_input}
-
-输出5个分析卡片（纯HTML inline style，中文，不含markdown）：
-1. 📊 竞争格局：品类成熟度、价格带分布、竞争强度（2-3句）
-2. 👥 核心用户画像：谁在买、为什么买、主要场景（2-3句）
-3. 🚀 Top3机会点：具体可操作，每条一句，绿色高亮
-   样式：background:#e8f5e9;border-left:4px solid #1b5e20;padding:8px 12px;margin:6px 0
-4. ⚠️ Top3风险点：基于危机aspects和痛点，每条一句，红色高亮
-   样式：background:#ffebee;border-left:4px solid #b71c1c;padding:8px 12px;margin:6px 0
-5. 💡 入场建议：差异化策略，2-3句
-   样式：background:#fff3e0;border-left:4px solid #e65100;padding:8px 12px
-
-布局：卡片1+2用 display:grid;grid-template-columns:1fr 1fr;gap:16px 包裹，3-5各自独立
-卡片样式：background:#fff;border:1px solid #e0e0e0;padding:20px;margin-bottom:16px
-标题样式：font-size:16px;font-weight:700;color:#2c3e50;margin-bottom:12px
-正文样式：font-size:13px;line-height:1.7;color:#444
-```
-
-
-### Step 7.7：视觉规范（品类报告）
+路径由 `scripts/paths.py` 动态解析，结构如下：
 
 ```
-背景：#f5f5f5（页面）/ #ffffff（卡片）
-主色：#2c3e50
-警示色：#b71c1c（危机/风险）
-机会色：#1b5e20（机会点）
-卡片：border:1px solid #e0e0e0，无圆角，无阴影
-字体：-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif
-容器：max-width:1400px; margin:0 auto; padding:24px
-ECharts CDN：https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js
-ASIN 图表 id：chart-{ASIN}（唯一，在 ontoggle 事件中初始化，防止折叠前渲染）
+{P["workspace"]}/          # Mac: ~/.openclaw/workspace | Win: %APPDATA%/openclaw/workspace
+├── batch/
+│   ├── queue.txt
+│   ├── status.json        # failedAt / note 精确记录
+│   └── batch-*.log
+├── memory/
+│   └── apify-token-state.json   # exhausted_at 冷却状态
+└── reports/
+    └── {ASIN}/
+        ├── {ASIN}-product.json
+        ├── {ASIN}-reviews-raw.json
+        ├── {ASIN}-reviews-meta.json
+        ├── {ASIN}-data.json
+        └── {ASIN}-report.html
 ```
-
-**第7部分 ASIN 图表初始化方式**（必须用 ontoggle，不能在 window.onload）：
-```html
-<details id="{asin}" ontoggle="initAsinChart(this,'{asin}',{asp_names},{asp_pos},{asp_neg},{asp_mix})">
-```
-```javascript
-var _initedCharts = {};
-function initAsinChart(el, asin, names, pos, neg, mix) {
-  if (!el.open || _initedCharts[asin]) return;
-  _initedCharts[asin] = true;
-  var c = echarts.init(document.getElementById('chart-' + asin));
-  c.setOption({ /* 堆叠条形图 */ });
-}
-```
-
-### Step 7.8：错误处理（品类模式）
-
-| 错误 | 原因 | 修复方式 |
-|------|------|---------|
-| `run error: terminated` | exec 单次内容过大 | 改用 `cat > file << 'EOF'` 写文件后运行 |
-| `SyntaxError` 在 f-string 内 | 内嵌引号冲突 | 改用字符串拼接，不用 f-string |
-| `ABSA aspects: 0` | 字段名用了 `sentiment` | 必须用 `aspectSentiment`，见 Step 7.3 |
-| 文件 < 100KB | AI总结未生成或数据为空 | 检查 LLM 调用；检查 asinDetails 是否有数据 |
-| AI总结调用失败 | 网络超时或接口异常 | 降级：用固定模板文字替代，不阻断报告生成 |
-| `totalReviews` 异常偏大 | ReviewCount 字段含总评论数非负评数 | meta.totalReviews 用 len(reviews)，不用 sum(ReviewCount) |
-
 
 ---
 
 ## 参考文件
 
-- `references/analysis-prompts.md` — 6个专家角色完整提示词
-- `references/domain-map.md` — 站点映射 + 降级链配置
-- `references/report-spec.md` — 单品报告规范文档
-- `scripts/scrape-product.sh` — 商品信息爬取
+- `references/analysis-prompts.md` — 8个专家角色完整提示词
+- `references/domain-map.md` — 站点映射 + Apify Actor 说明
+- `references/report-spec.md` — 品类报告视觉规范
 - `scripts/apify-reviews.sh` — Apify Level 1 评论爬取
-- `scripts/browser-reviews.py` — Level 2 浏览器自动化
-- `scripts/run-pipeline.sh` — 并行调度主脚本
-- `scripts/generate-report.py` — 单品报告生成（7模块）
+- `scripts/scrape-reviews.py` — 评论采集主控（降级链 + 硬出口）
+- `scripts/generate-report.py` — 单品报告渲染（固定脚本）
+- `scripts/generate-category.py` — 品类报告渲染（固定脚本，待创建）
+- `scripts/validate-report.py` — 报告结构校验 + fallback
 - `scripts/batch-run.sh` — 批量队列调度
-- `scripts/batch-status.sh` — 批量进度查看
-- `scripts/generate-batch-summary.py` — 批量汇总总览生成
+- `scripts/generate-batch-summary.py` — 批量汇总总览
