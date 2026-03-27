@@ -17,8 +17,10 @@ OUTPUT_FILE = sys.argv[2] if len(sys.argv) > 2 else os.path.join(_P["reports"], 
 REPORT_BASE = _P["reports"]
 
 d = json.load(open(STATUS_FILE)) if os.path.exists(STATUS_FILE) else {}
-total = len(d)
-done  = sum(1 for v in d.values() if v.get('status') == 'done')
+# 过滤掉 _summary 等非 ASIN 字段（值为字符串）
+asin_data = {k: v for k, v in d.items() if isinstance(v, dict)}
+total = len(asin_data)
+done  = sum(1 for v in asin_data.values() if v.get('status') == 'done')
 generated_at = datetime.now().strftime('%Y-%m-%d %H:%M')
 
 status_badge = {
@@ -53,7 +55,7 @@ def get_opportunity(asin):
         return ''
 
 rows_html = ''
-for i, (asin, v) in enumerate(sorted(d.items()), 1):
+for i, (asin, v) in enumerate(sorted(asin_data.items()), 1):
     st = v.get('status', 'unknown')
     badge, row_bg = status_badge.get(st, ('<span style="background:#9e9e9e;color:#fff;padding:2px 8px;font-size:11px;">未知</span>', '#fafafa'))
     product, img_url = get_product_info(asin)
@@ -110,7 +112,7 @@ for i, (asin, v) in enumerate(sorted(d.items()), 1):
     </tr>'''
 
 pct         = int(done / total * 100) if total else 0
-failed_list = [(k, v) for k, v in d.items() if isinstance(v, dict) and v.get('status') == 'failed']
+failed_list = [(k, v) for k, v in asin_data.items() if v.get('status') == 'failed']
 summary_str = d.get('_summary', '')
 
 def _build_failed_block(fl):
@@ -178,9 +180,9 @@ html = f'''<!DOCTYPE html>
   <div class="kpi-row">
     <div class="kpi"><div class="num">{total}</div><div class="label">总 ASIN 数</div></div>
     <div class="kpi"><div class="num" style="color:#1b5e20;">{done}</div><div class="label">已完成</div></div>
-    <div class="kpi"><div class="num" style="color:#e65100;">{sum(1 for v in d.values() if v.get('status')=='pending_analysis')}</div><div class="label">分析中</div></div>
-    <div class="kpi"><div class="num" style="color:#1565c0;">{sum(1 for v in d.values() if 'scraping' in v.get('status',''))}</div><div class="label">采集中</div></div>
-    <div class="kpi"><div class="num" style="color:#b71c1c;">{sum(1 for v in d.values() if v.get('status')=='failed')}</div><div class="label">失败</div></div>
+    <div class="kpi"><div class="num" style="color:#e65100;">{sum(1 for v in asin_data.values() if v.get('status')=='pending_analysis')}</div><div class="label">分析中</div></div>
+    <div class="kpi"><div class="num" style="color:#1565c0;">{sum(1 for v in asin_data.values() if 'scraping' in v.get('status',''))}</div><div class="label">采集中</div></div>
+    <div class="kpi"><div class="num" style="color:#b71c1c;">{sum(1 for v in asin_data.values() if v.get('status')=='failed')}</div><div class="label">失败</div></div>
   </div>
 
   <div class="card">
