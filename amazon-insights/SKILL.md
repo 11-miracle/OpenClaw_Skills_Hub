@@ -399,42 +399,95 @@ def parse_aspects(s):
 
 ### Phase 7：数据处理
 
-AI 编写 gen_report_data.py 生成 `/tmp/report_data.json`，遵守写→验→修→继续规范。
+AI 直接组装 `batch/category-data.json`，遵守写→验→修→继续规范。
 
-输出结构：
+**⚠️ 必须严格按以下 schema 生成，字段名与 `generate-category.py` 完全对应：**
+
 ```json
 {
-  "meta":         {"totalProducts":0,"avgRating":0,"totalReviews":0,"negRate":0},
-  "priceDist":    {},
-  "ratingDist":   {},
-  "productTable": [],
-  "personaWords": {},
-  "scenarioTop10":[],
-  "painTop5":     [],
-  "absaList":     [],
-  "appealsData":  {},
-  "kanoList":     [],
-  "painData":     [],
-  "joyData":      [],
-  "itchData":     [],
-  "journeyData":  {},
-  "journeyTop3":  {},
-  "asinDetails":  []
+  "meta": {
+    "total_products": 5,
+    "avg_rating": 4.3,
+    "total_reviews": 2500,
+    "neg_rate": 18.5
+  },
+  "products": [
+    {
+      "asin": "B0XXXXXXXX",
+      "title": "商品标题",
+      "price": "$19.99",
+      "rating": 4.2,
+      "review_count": 500,
+      "one_liner": "一句话核心点评",
+      "absa": [
+        {"name": "方面名", "positive": 80, "negative": 40, "mixed": 15}
+      ]
+    }
+  ],
+  "category_analysis": {
+    "psps": {
+      "persona": [
+        {"label": "用户画像名称", "count": 45},
+        {"label": "第二画像", "count": 30}
+      ],
+      "scenario": [
+        {"label": "使用场景", "count": 52},
+        {"label": "第二场景", "count": 20}
+      ],
+      "pain": [
+        {"label": "痛点描述（来自关键词频次）", "count": 27},
+        {"label": "第二痛点", "count": 16}
+      ]
+    },
+    "absa": [
+      {"name": "方面名称", "positive": 140, "negative": 210, "mixed": 35}
+    ],
+    "appeals": {
+      "Price": 55, "Performance": 28, "Packaging": 48,
+      "Ease": 22, "Assurances": 20, "LifeCycle": 12, "Social": 38
+    },
+    "kano": {
+      "must_be":     ["基础需求1", "基础需求2"],
+      "performance": ["期望需求1"],
+      "attractive":  ["魅力需求1"],
+      "indifferent": ["无差异需求1"],
+      "reverse":     ["反向需求1"]
+    },
+    "pain_joy_itch": {
+      "pain":  ["痛点1", "痛点2"],
+      "joy":   ["爽点1", "爽点2"],
+      "itch":  ["痒点1", "痒点2"]
+    },
+    "journey": [
+      {"stage": "搜索发现", "friction": "摩擦描述", "score": 6}
+    ],
+    "ai_summary": {
+      "competition": "竞争格局文字",
+      "persona":     "用户画像文字",
+      "opportunity": "机会点文字",
+      "risk":        "风险点文字",
+      "advice":      "入场建议文字"
+    }
+  }
 }
 ```
 
-验证：`absa`、`asinDetails`、`productTable` 字段非空。
+**PSPS 频次计算规则（必须执行，不得用占位符 1）：**
+- `pain.count` → 直接从各单品 `keywords[].count` 汇总同类关键词的总频次
+- `persona.count` → 基于各 ASIN 评论数 × 受众相关性估算（标注"推算"）
+- `scenario.count` → 基于评论中场景词（gift/birthday/school等）出现频次估算
+
+验证：`category_analysis.psps` 非空，且每个条目有 `label`+`count` 字段；`absa` 非空；`products` 每项有 `absa`。
 
 ### Phase 8：品类报告生成
 
 ```bash
 python3 {P["scripts"]}/generate-category.py \
-  /tmp/report_data.json {output}.html
+  {P["batch"]}/category-data.json \
+  {P["reports"]}/category-report.html
 ```
 
-> ⚠️ generate-category.py 尚未创建，AI 需先检查是否存在：
-> - 存在 → 直接调用
-> - 不存在 → 按写→验→修→继续规范编写，完成后保存到 scripts/ 目录
+> `generate-category.py` 已存在于 scripts/ 目录，直接调用即可。输入文件是 `batch/category-data.json`（Phase 7 输出），不是 `/tmp/report_data.json`。
 
 报告固定结构（9部分）：第0部分Dashboard / AI总结 / PSPS / ABSA / $APPEALS / KANO / 痛爽痒 / 用户旅程 / ASIN拆解
 
@@ -443,7 +496,7 @@ python3 {P["scripts"]}/generate-category.py \
 验证：
 ```bash
 python3 {P["scripts"]}/validate-report.py \
-  {output}.html --type category --data /tmp/report_data.json
+  {P["reports"]}/category-report.html --type category --data {P["batch"]}/category-data.json
 ```
 
 ---

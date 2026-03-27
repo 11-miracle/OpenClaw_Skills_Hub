@@ -142,10 +142,20 @@ def build_category_html(data, generated_at):
     ap_labels = list(appeals.keys()) if appeals else []
     ap_values = [int(v) if isinstance(v,(int,float)) else 1 for v in appeals.values()] if appeals else []
 
-    # PSPS 条形图数据
-    persona_list  = psps.get('persona', [])[:8]
-    scenario_list = psps.get('scenario', [])[:8]
-    pain_list     = psps.get('pain', [])[:8]
+    # PSPS 条形图数据 — 支持 [{label,count}] 或 [str] 两种格式
+    def _psps_parse(items, limit=8):
+        labels, counts = [], []
+        for item in (items or [])[:limit]:
+            if isinstance(item, dict):
+                labels.append(str(item.get('label', item.get('name', ''))))
+                counts.append(int(item.get('count', item.get('value', 1))))
+            else:
+                labels.append(str(item))
+                counts.append(1)
+        return labels, counts
+    persona_list,  persona_counts  = _psps_parse(psps.get('persona', []))
+    scenario_list, scenario_counts = _psps_parse(psps.get('scenario', []))
+    pain_list,     pain_counts     = _psps_parse(psps.get('pain', []))
 
     # 旅程折线数据
     journey_stages = [j.get('stage','') for j in journey]
@@ -290,7 +300,9 @@ def build_category_html(data, generated_at):
         'price_buckets': price_buckets, 'rating_buckets': rating_buckets,
         'absa_names': absa_names, 'absa_pos': absa_pos, 'absa_neg': absa_neg, 'absa_mix': absa_mix,
         'ap_labels': ap_labels, 'ap_values': ap_values,
-        'persona_list': persona_list, 'scenario_list': scenario_list, 'pain_list': pain_list,
+        'persona_list': persona_list, 'persona_counts': persona_counts,
+        'scenario_list': scenario_list, 'scenario_counts': scenario_counts,
+        'pain_list': pain_list, 'pain_counts': pain_counts,
         'journey_stages': journey_stages, 'journey_scores': journey_scores,
         'products': products,
     }
@@ -309,9 +321,9 @@ def build_category_scripts(ctx):
     pn = json.dumps(ctx['persona_list'][::-1])
     sn = json.dumps(ctx['scenario_list'][::-1])
     dn = json.dumps(ctx['pain_list'][::-1])
-    pv_ones = json.dumps([1]*len(ctx['persona_list']))
-    sv_ones = json.dumps([1]*len(ctx['scenario_list']))
-    dv_ones = json.dumps([1]*len(ctx['pain_list']))
+    pv_ones = json.dumps(ctx['persona_counts'][::-1])
+    sv_ones = json.dumps(ctx['scenario_counts'][::-1])
+    dv_ones = json.dumps(ctx['pain_counts'][::-1])
     js = json.dumps(ctx['journey_stages'])
     jsc = json.dumps(ctx['journey_scores'])
     has_journey = len(ctx['journey_stages']) > 0
