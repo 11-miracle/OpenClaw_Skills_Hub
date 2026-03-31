@@ -141,37 +141,60 @@ REPORT_DIR=$(echo "$_PATHS" | python3 -c "import json,sys; print(json.load(sys.s
 意图修正：quick×0.3 / standard×1.0 / deep×2.0 / batch×0.5
 最终结果 clamp 到 [20, 1000]。
 
-**Step B：选择采集方式**
+**Step B：选择采集方式（必须执行，不得跳过）**
 
-检查 Apify token 冷却状态：
+**⚠️ 必须先执行以下命令，根据输出结果决定路径，不得凭印象判断：**
+
 ```bash
-python3 -c "
-import json,os,time
-f=os.path.join(P['memory'],'apify-token-state.json')
-d=json.load(open(f)) if os.path.exists(f) else {}
-ex=d.get('exhausted_at',0)
-hrs=(time.time()-ex)/3600
-print('cooldown' if hrs<4 else 'available')
-"
+SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || echo "$HOME/openclaw/skills/amazon-insights/scripts")"
+python3 - << 'EOF'
+import json, os, time
+state_file = os.path.expanduser("~/.openclaw/workspace/memory/apify-token-state.json")
+d = json.load(open(state_file)) if os.path.exists(state_file) else {}
+ex = d.get("exhausted_at", 0)
+hrs = (time.time() - ex) / 3600
+tokens = [v for k, v in sorted(os.environ.items()) if k.startswith("APIFY_TOKEN")]
+print(f"STATUS={'cooldown' if hrs < 4 else 'available'}")
+print(f"TOKENS={len(tokens)}")
+print(f"COOLDOWN_HRS={hrs:.1f}")
+EOF
 ```
+
+输出 `STATUS=available` 且 `TOKENS>0` → **必须走 Apify 路径**
+输出 `STATUS=cooldown` 或 `TOKENS=0` → 走浏览器翻页路径
 
 | 状态 | 策略 |
 |------|------|
-| available | 先试 Apify（bash apify-reviews.sh），失败直接切浏览器 |
-| cooldown | 跳过 Apify，直接浏览器翻页 |
+| available + TOKENS>0 | **必须先用 Apify**（bash apify-reviews.sh），失败才切浏览器 |
+| cooldown 或 TOKENS=0 | 跳过 Apify，直接浏览器翻页 |
 
 ---
 
 ### Phase 3：评论采集执行
 
-**Apify 路径**（available 时）：
+**Apify 路径**（Step B 判定 available + TOKENS>0 时，必须首先执行）：
+
+**Step C-1：差评采集（必须）**
 ```bash
-bash {P["scripts"]}/apify-reviews.sh {ASIN} {domain} {target}
+bash {P["scripts"]}/apify-reviews.sh {ASIN} {domain} {target} negative
 ```
-- 成功且 >= 20 条 → 进 Phase 4
-- 失败/超时/0条 → 立即切浏览器，记录 `exhausted_at`
+- 成功且 >= 20 条 → 保存 `{ASIN}-reviews-raw.json`，继续 Step C-2
+- 返回 0 条（exit 2）→ 切浏览器路径（差评+好评均走浏览器），记录 `exhausted_at`
+- 失败/超时（exit 1）→ 切浏览器路径，记录 `exhausted_at`
+
+**Step C-2：好评采集（差评成功后紧接执行，不并行）**
+```bash
+bash {P["scripts"]}/apify-reviews.sh {ASIN} {domain} 25 positive
+```
+- 成功且 >= 5 条 → 保存 `{ASIN}-reviews-positive.json`，进 Phase 4
+- 失败/0 条 → 走浏览器好评补采（见下方浏览器路径好评部分），不阻断 Phase 4
+- 好评不足时：`reviews-positive.json` 写入 `{"data_unavailable": true, "reviews": []}`，Phase 4 标注"好评样本不足，结论供参考"
+
+**❌ 禁止在未执行 Apify 差评的情况下直接走浏览器翻页路径。**
 
 **浏览器翻页路径**：
+
+**差评抓取**（1-3星）：
 
 AI 直接用 browser 工具逐页抓取，URL 模板：
 ```
@@ -217,6 +240,46 @@ https://www.{domain}/product-reviews/{ASIN}?filterByStar=critical&sortBy=recent&
 
 ---
 
+**好评补采**（差评浏览器路径完成后，或 Apify 好评步骤失败时触发）：
+
+URL 模板：
+```
+https://www.{domain}/product-reviews/{ASIN}?filterByStar=five_star&sortBy=recent&pageNumber={n}
+```
+
+每页提取 JS（与差评对称，仅星级过滤条件不同）：
+```javascript
+() => {
+  const reviews = [];
+  document.querySelectorAll('[data-hook="review"]').forEach(el => {
+    const ratingEl  = el.querySelector('[data-hook="review-star-rating"] .a-icon-alt');
+    const ratingNum = parseFloat((ratingEl?.textContent||'').split(' ')[0]) || 0;
+    if (ratingNum >= 4) {   // 仅保留好评
+      reviews.push({
+        rating:   ratingNum,
+        title:    el.querySelector('[data-hook="review-title"] span:not(.a-icon-alt)')?.textContent?.trim() || '',
+        body:     el.querySelector('[data-hook="review-body"] span')?.textContent?.trim() || '',
+        date:     el.querySelector('[data-hook="review-date"]')?.textContent?.trim() || '',
+        verified: !!el.querySelector('[data-hook="avp-badge"]')
+      });
+    }
+  });
+  const hasNext = !!document.querySelector('li.a-last:not(.a-disabled) a');
+  return JSON.stringify({reviews, hasNext});
+}
+```
+
+**硬出口（好评只需少量样本，比差评更严格）**：
+- ✅ 已采集 >= 25 条
+- ⛔ hasNext=false
+- ⏰ 翻页超过 2 页（好评不需要深翻）
+
+好评 < 5 条时写入 `{"data_unavailable": true, "reviews": []}` 并标注，不影响后续分析。
+
+保存到：`{P["report_dir"]}/{ASIN}-reviews-positive.json`
+
+---
+
 ### Phase 4：AI 分析（流式输出）
 
 评论够20条即可开始分析，不等满。
@@ -229,9 +292,9 @@ https://www.{domain}/product-reviews/{ASIN}?filterByStar=critical&sortBy=recent&
 - 完成后立即输出视觉摘要
 
 **② VOC 需求分析**（评论到手后触发）
-- 非中文评论先翻译（`references/analysis-prompts.md` 第7节，50条/批）
-- 输入：全部差评
-- 提示词：第3节（PSPS + ABSA + $APPEALS + KANO + 痛爽痒）
+- 非中文评论先翻译（`references/analysis-prompts.md` 第7节，50条/批）；差评池与好评池分别翻译
+- 输入：全部差评（`reviews-raw.json`）+ 好评池（`reviews-positive.json`，若 `data_unavailable=true` 则跳过好评侧分析）
+- 提示词：第3节（PSPS + ABSA + $APPEALS + KANO + 痛爽痒 + review_summary + innovation）
 - 输出结构化 JSON 到内存
 
 **③ 单品拆解**（①完成后触发）
@@ -268,6 +331,12 @@ T+150s "报告生成中..."
   "journey_map":      {}
 }
 ```
+
+`reviews_analysis` 中包含两个新字段（由 Phase 4 AI 输出，格式见 `references/analysis-prompts.md` 第3节）：
+- `review_summary`：好差评维度汇总，含 `positive[]`、`negative[]`、`overall_verdict`
+- `innovation`：产品创新机会，含 `summary` 和 `opportunities[]`
+
+好评数据不可用时：`review_summary.positive` 为空数组，`innovation` 仅基于差评推导。
 
 **生成 HTML**：
 ```bash
@@ -517,6 +586,7 @@ python3 {P["scripts"]}/validate-report.py \
     └── {ASIN}/
         ├── {ASIN}-product.json
         ├── {ASIN}-reviews-raw.json
+        ├── {ASIN}-reviews-positive.json
         ├── {ASIN}-reviews-meta.json
         ├── {ASIN}-data.json
         └── {ASIN}-report.html

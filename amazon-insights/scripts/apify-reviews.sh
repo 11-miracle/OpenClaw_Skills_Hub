@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
-# apify-reviews.sh — 通过 Apify 爬取亚马逊差评（3星及以下），支持多账号轮换
-# 用法: bash apify-reviews.sh <ASIN> [domain] [max_reviews]
-# 示例: bash apify-reviews.sh B08N5WRWNW amazon.com 200
+# apify-reviews.sh — 通过 Apify 爬取亚马逊评论，支持差评/好评切换，支持多账号轮换
+# 用法: bash apify-reviews.sh <ASIN> [domain] [max_reviews] [filter_type]
+# 示例: bash apify-reviews.sh B08N5WRWNW amazon.com 200 negative
+#       bash apify-reviews.sh B08N5WRWNW amazon.com 25  positive
+#
+# filter_type 说明：
+#   negative（默认）→ filter_by_ratings = ["1 star only","2 star only","3 star only"]
+#   positive        → filter_by_ratings = ["5 star only"]
 #
 # 退出码说明：
 #   0 = 成功，有数据（stdout 输出 JSON 数组）
@@ -13,6 +18,7 @@ set -uo pipefail
 ASIN="${1:?需要提供 ASIN}"
 DOMAIN="${2:-amazon.com}"
 MAX_REVIEWS="${3:-200}"
+FILTER_TYPE="${4:-negative}"   # negative | positive
 STATE_FILE="${HOME}/.openclaw/workspace/memory/apify-token-state.json"
 APIFY_API="https://api.apify.com/v2"
 
@@ -61,6 +67,7 @@ run_apify() {
   local asin="$2"
   local domain="$3"
   local max="$4"
+  local ftype="${5:-negative}"
 
   # domain → country code
   local country_code
@@ -85,7 +92,15 @@ run_apify() {
     *)              country_code="US" ;;
   esac
 
-  echo "🚀 [Apify] 启动 Actor (delicious_zebu)..." >&2
+  # 根据 filter_type 选星级
+  local filter_ratings
+  if [ "$ftype" = "positive" ]; then
+    filter_ratings='["5 star only"]'
+    echo "🚀 [Apify] 启动 Actor (delicious_zebu) — 好评模式..." >&2
+  else
+    filter_ratings='["1 star only", "2 star only", "3 star only"]'
+    echo "🚀 [Apify] 启动 Actor (delicious_zebu) — 差评模式..." >&2
+  fi
 
   # 异步启动，不等待（waitForFinish=0），立即拿 run_id
   local run_resp
@@ -97,7 +112,7 @@ run_apify() {
       \"ASIN_or_URL\": [\"${asin}\"],
       \"country\": \"${country_code}\",
       \"max_reviews\": ${max},
-      \"filter_by_ratings\": [\"1 star only\", \"2 star only\", \"3 star only\"],
+      \"filter_by_ratings\": ${filter_ratings},
       \"sort_reviews_by\": [\"Most recent\"],
       \"unique_only\": true,
       \"filter_by_verified_purchase_only\": [\"All reviews\"],
@@ -189,7 +204,7 @@ main() {
     echo "🔑 [Apify] 使用账号$((idx+1)) (共 ${total} 个)" >&2
 
     local result exit_code
-    result=$(run_apify "$token" "$ASIN" "$DOMAIN" "$MAX_REVIEWS")
+    result=$(run_apify "$token" "$ASIN" "$DOMAIN" "$MAX_REVIEWS" "$FILTER_TYPE")
     exit_code=$?
 
     case $exit_code in

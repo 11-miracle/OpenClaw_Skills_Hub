@@ -220,19 +220,141 @@ footer{text-align:center;font-size:12px;color:#aaa;padding:24px}
         'kano': kano, 'opportunity': opportunity, 'sample_revs': sample_revs,
         'keywords': keywords, 'must_copy': must_copy, 'must_avoid': must_avoid, 'conclusion': conclusion,
         'reviews_meta': reviews_meta, 'asin': asin, 'generated_at': generated_at,
+        'reviews_analysis': reviews_analysis,
     }
 
+def build_review_summary_card(p, ra):
+    """好差评深度汇总卡片：双列 insight + 原文，插在单品拆解后、差评剧场前"""
+    rs = ra.get('review_summary', {})
+    if not rs:
+        return
+    positives = rs.get('positive', [])
+    negatives = rs.get('negative', [])
+    verdict   = rs.get('overall_verdict', '')
+
+    def dim_rows(items, side):
+        if not items:
+            return '<div style="color:#aaa;font-size:13px;padding:12px;">暂无数据</div>'
+        html = ''
+        for item in items:
+            dim   = item.get('dimension', '')
+            score = item.get('sentiment_score', '')
+            ins   = item.get('insight', '')
+            quotes = item.get('quotes', [])
+            score_color = '#1b5e20' if side == 'pos' else '#b71c1c'
+            score_icon  = '★' if side == 'pos' else '●'
+            quotes_html = ''.join(
+                '<div style="font-size:12px;color:#555;padding:4px 0 4px 8px;border-left:2px solid #e0e0e0;margin-top:4px;">▸ ' + q + '</div>'
+                for q in quotes[:2])
+            html += (
+                '<div style="margin-bottom:18px;">'
+                '<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:6px;">'
+                '<span style="font-weight:700;font-size:13px;color:#2c3e50;">[' + dim + ']</span>'
+                '<span style="font-size:12px;font-weight:600;color:' + score_color + ';">' + score_icon + str(score) + '</span>'
+                '</div>'
+                '<div style="font-size:12px;line-height:1.7;color:#444;background:#fafafa;padding:8px 10px;border-left:3px solid ' + score_color + ';">' + ins + '</div>'
+                + quotes_html +
+                '</div>'
+            )
+        return html
+
+    verdict_html = (
+        '<div style="background:#f5f5f5;border-left:4px solid #607d8b;padding:12px 16px;'
+        'margin-bottom:20px;font-size:13px;line-height:1.8;color:#37474f;font-weight:500;">'
+        '📊 <strong>整体结论：</strong>' + verdict + '</div>'
+    ) if verdict else ''
+
+    p.append(
+        '<div class="card"><h2>📣 好差评深度汇总</h2>'
+        + verdict_html +
+        '<div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">'
+        '<div>'
+        '<div style="font-size:13px;font-weight:700;color:#1b5e20;padding:8px 12px;'
+        'background:#e8f5e9;margin-bottom:16px;">👍 好评核心</div>'
+        + dim_rows(positives, 'pos') +
+        '</div>'
+        '<div>'
+        '<div style="font-size:13px;font-weight:700;color:#b71c1c;padding:8px 12px;'
+        'background:#ffebee;margin-bottom:16px;">👎 差评核心</div>'
+        + dim_rows(negatives, 'neg') +
+        '</div>'
+        '</div></div>'
+    )
+
+
+def build_innovation_card(p, ra):
+    """产品创新机会卡片：summary + 每个机会点三行结构，按优先级排序"""
+    inn = ra.get('innovation', {})
+    if not inn:
+        return
+    summary = inn.get('summary', '')
+    opps    = inn.get('opportunities', [])
+    if not opps:
+        return
+
+    opps_sorted = sorted(opps, key=lambda x: x.get('priority', 99))
+
+    feasibility_color = {'高': '#1b5e20', '中': '#e65100', '低': '#9e9e9e'}
+    feasibility_bg    = {'高': '#e8f5e9', '中': '#fff3e0', '低': '#f5f5f5'}
+    type_icon = {'功能创新': '🔧', '体验创新': '✨', '包装形式创新': '📦'}
+
+    summary_html = (
+        '<div style="background:#e3f2fd;border-left:4px solid #1565c0;padding:12px 16px;'
+        'margin-bottom:20px;font-size:13px;line-height:1.8;color:#0d47a1;font-weight:500;">'
+        '🔭 <strong>创新方向：</strong>' + summary + '</div>'
+    ) if summary else ''
+
+    opps_html = ''
+    for opp in opps_sorted:
+        oid   = opp.get('id', '')
+        otype = opp.get('type', '')
+        title = opp.get('title', '')
+        pain  = opp.get('user_pain', '')
+        evid  = opp.get('evidence', '')
+        how   = opp.get('how_to_improve', '')
+        out   = opp.get('expected_outcome', '')
+        feas  = opp.get('feasibility', '中')
+        icon  = type_icon.get(otype, '💡')
+        fc    = feasibility_color.get(feas, '#9e9e9e')
+        fb    = feasibility_bg.get(feas, '#f5f5f5')
+
+        opps_html += (
+            '<div style="border:1px solid #e0e0e0;padding:16px;margin-bottom:12px;background:#fff;">'
+            '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">'
+            '<div style="font-weight:700;font-size:14px;color:#2c3e50;">'
+            + icon + ' <span style="color:#888;font-size:12px;margin-right:6px;">优先级' + str(oid) + '</span>'
+            + title + '</div>'
+            '<span style="font-size:11px;font-weight:600;padding:2px 8px;background:' + fb + ';color:' + fc + ';">● ' + feas + '可行性</span>'
+            '</div>'
+            '<div style="display:grid;grid-template-columns:auto 1fr;gap:4px 10px;font-size:12px;line-height:1.7;">'
+            '<span style="color:#888;white-space:nowrap;">👤 用户说：</span><span style="color:#444;">' + pain + '</span>'
+            '<span style="color:#888;white-space:nowrap;">📎 依据：</span><span style="color:#555;font-style:italic;">' + evid + '</span>'
+            '<span style="color:#888;white-space:nowrap;">🔧 怎么改：</span><span style="color:#444;">' + how + '</span>'
+            '<span style="color:#888;white-space:nowrap;">📈 预期效果：</span><span style="color:#1b5e20;font-weight:500;">' + out + '</span>'
+            '</div>'
+            '</div>'
+        )
+
+    p.append(
+        '<div class="card"><h2>💡 产品创新机会</h2>'
+        + summary_html
+        + opps_html
+        + '</div>'
+    )
+
+
 def build_analysis_section(p, ctx):
-    """差评分析 + 单品拆解 + 评论剧场"""
-    kano        = ctx['kano']
-    opportunity = ctx['opportunity']
-    sample_revs = ctx['sample_revs']
-    keywords    = ctx['keywords']
-    must_copy   = ctx['must_copy']
-    must_avoid  = ctx['must_avoid']
-    conclusion  = ctx['conclusion']
-    reviews_meta = ctx['reviews_meta']
-    absa_names  = ctx['absa_names']
+    """差评分析 + 单品拆解 + 好差评汇总 + 创新机会 + 评论剧场"""
+    kano           = ctx['kano']
+    opportunity    = ctx['opportunity']
+    sample_revs    = ctx['sample_revs']
+    keywords       = ctx['keywords']
+    must_copy      = ctx['must_copy']
+    must_avoid     = ctx['must_avoid']
+    conclusion     = ctx['conclusion']
+    reviews_meta   = ctx['reviews_meta']
+    absa_names     = ctx['absa_names']
+    reviews_analysis = ctx.get('reviews_analysis', {})
 
     # 差评分析 card
     p.append('<div class="card"><h2>差评分析（3星及以下）</h2>')
@@ -283,6 +405,12 @@ def build_analysis_section(p, ctx):
         p.append(f'<div style="background:#f5f5f5;border-left:4px solid #2c3e50;padding:14px 16px;'
                  f'margin-top:16px;font-size:13px;line-height:1.8;color:#444;">💡 {conclusion}</div>')
     p.append('</div>')
+
+    # 好差评深度汇总
+    build_review_summary_card(p, reviews_analysis)
+
+    # 产品创新机会
+    build_innovation_card(p, reviews_analysis)
 
     # 差评原声剧场 card
     p.append('<div class="card"><h2>差评原声剧场（真实评论摘录）</h2>'
