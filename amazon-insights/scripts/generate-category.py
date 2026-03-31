@@ -94,6 +94,248 @@ def journey_cards(journey):
     n = len(journey)
     return f'<div style="display:grid;grid-template-columns:repeat({min(n,6)},1fr);gap:10px;margin-bottom:16px;">{cards}</div>'
 
+def build_rs_section(products):
+    """第8部分：品类好差评横向对比（从所有 ASIN review_summary 聚合）"""
+    # ── 聚合 ──
+    from collections import Counter, defaultdict
+    pos_dims = defaultdict(list)   # dim -> [{asin, insight, score, quotes}]
+    neg_dims = defaultdict(list)
+    verdicts = []
+
+    for prod in products:
+        asin = prod.get('asin','')
+        rs   = prod.get('review_summary', {})
+        if not rs:
+            continue
+        for item in rs.get('positive', []):
+            pos_dims[item.get('dimension','')].append({
+                'asin': asin, 'insight': item.get('insight',''),
+                'score': item.get('sentiment_score',0),
+                'quotes': item.get('quotes',[])
+            })
+        for item in rs.get('negative', []):
+            neg_dims[item.get('dimension','')].append({
+                'asin': asin, 'insight': item.get('insight',''),
+                'score': item.get('sentiment_score',0),
+                'quotes': item.get('quotes',[])
+            })
+        v = rs.get('overall_verdict','')
+        if v:
+            verdicts.append({'asin': asin, 'verdict': v,
+                             'rating': prod.get('rating','')})
+
+    if not pos_dims and not neg_dims:
+        return ''
+
+    def dim_block(dims_dict, side):
+        sc     = '#1b5e20' if side == 'pos' else '#b71c1c'
+        bg     = '#e8f5e9' if side == 'pos' else '#ffebee'
+        icon   = '👍' if side == 'pos' else '👎'
+        label  = '好评核心维度' if side == 'pos' else '差评核心维度'
+        # 按出现次数（ASIN数）降序
+        sorted_dims = sorted(dims_dict.items(), key=lambda x: -len(x[1]))
+        rows = ''
+        for dim, entries in sorted_dims:
+            freq = len(entries)
+            freq_bar = '█' * freq + '░' * (len(products) - freq)
+            asin_tags = ' '.join(
+                f'<span style="display:inline-block;background:{bg};color:{sc};'
+                f'font-size:10px;padding:1px 5px;margin:1px;font-weight:600;">{e["asin"]}</span>'
+                for e in entries
+            )
+            # 取最有代表性的一条 insight（score 最高）
+            best = max(entries, key=lambda x: x.get('score', 0))
+            insight_html = (
+                f'<div style="font-size:11px;color:#444;line-height:1.5;padding:6px 8px;'
+                f'background:#fafafa;border-left:3px solid {sc};margin:4px 0;">'
+                f'{best["insight"]}</div>'
+            )
+            q_html = ''
+            for q in best.get('quotes', [])[:1]:
+                q_html += (
+                    f'<div style="font-size:10px;color:#888;padding:2px 0 2px 8px;'
+                    f'border-left:2px solid #ddd;font-style:italic;">▸ {q}</div>'
+                )
+            rows += (
+                f'<div style="margin-bottom:16px;padding-bottom:14px;border-bottom:1px solid #f0f0f0;">'
+                f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">'
+                f'<span style="font-weight:700;font-size:13px;color:#2c3e50;">{dim}</span>'
+                f'<span style="font-size:11px;color:#888;">{freq}/{len(products)} 个ASIN提及 &nbsp;'
+                f'<span style="color:{sc};font-family:monospace;">{freq_bar}</span></span>'
+                f'</div>'
+                f'{asin_tags}'
+                f'{insight_html}'
+                f'{q_html}'
+                f'</div>'
+            )
+        return (
+            f'<div>'
+            f'<div style="font-size:13px;font-weight:700;padding:8px 12px;background:{bg};'
+            f'color:{sc};margin-bottom:14px;">{icon} {label}（按品类覆盖频次排序）</div>'
+            f'{rows}</div>'
+        )
+
+    # ── verdict 卡片墙 ──
+    verdict_cards = ''
+    for v in verdicts:
+        ra_str = v.get('rating','')
+        verdict_cards += (
+            f'<div style="background:#fff;border:1px solid #e0e0e0;padding:14px;">'
+            f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">'
+            f'<span style="font-family:monospace;font-weight:700;font-size:12px;color:#2c3e50;">{v["asin"]}</span>'
+            f'<span style="color:#f9a825;font-weight:700;">★{ra_str}</span>'
+            f'</div>'
+            f'<div style="font-size:12px;line-height:1.6;color:#444;">{v["verdict"]}</div>'
+            f'</div>'
+        )
+    n_v = len(verdicts)
+    cols_v = min(n_v, 3)
+    verdict_section = ''
+    if verdict_cards:
+        verdict_section = (
+            f'<div style="margin-top:20px;border-top:1px solid #eee;padding-top:16px;">'
+            f'<div style="font-size:13px;font-weight:700;color:#2c3e50;margin-bottom:12px;">'
+            f'📊 各产品整体定位评价</div>'
+            f'<div style="display:grid;grid-template-columns:repeat({cols_v},1fr);gap:12px;">'
+            f'{verdict_cards}</div></div>'
+        )
+
+    html = (
+        f'<div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:4px;">'
+        f'{dim_block(pos_dims, "pos")}'
+        f'{dim_block(neg_dims, "neg")}'
+        f'</div>'
+        f'{verdict_section}'
+    )
+    return html
+
+
+def build_innovation_section(products, ai_sum):
+    """第9部分：品类创新机会汇总（从所有 ASIN innovation 聚合 + ai_summary）"""
+    from collections import defaultdict
+
+    TYPE_ICON = {'功能创新': '🔧', '体验创新': '✨', '包装形式创新': '📦'}
+    FC_MAP    = {'高': '#1b5e20', '中': '#e65100', '低': '#9e9e9e'}
+    FB_MAP    = {'高': '#e8f5e9', '中': '#fff3e0', '低': '#f5f5f5'}
+
+    by_type = defaultdict(list)  # type -> [opp_dict + asin]
+    top_opps = []  # priority=1 & feasibility=高
+
+    for prod in products:
+        asin = prod.get('asin','')
+        inn  = prod.get('innovation', {})
+        if not inn:
+            continue
+        for opp in inn.get('opportunities', []):
+            entry = dict(opp)
+            entry['_asin'] = asin
+            t = opp.get('type','其他')
+            by_type[t].append(entry)
+            if opp.get('priority') == 1 and opp.get('feasibility') == '高':
+                top_opps.append(entry)
+
+    if not by_type:
+        return ''
+
+    def opp_card(opp):
+        otype = opp.get('type','')
+        title = opp.get('title','')
+        pain  = opp.get('user_pain','')
+        how   = opp.get('how_to_improve','')
+        out   = opp.get('expected_outcome','')
+        feas  = opp.get('feasibility','中')
+        asin  = opp.get('_asin','')
+        icon  = TYPE_ICON.get(otype, '💡')
+        fc    = FC_MAP.get(feas,'#9e9e9e')
+        fb    = FB_MAP.get(feas,'#f5f5f5')
+        return (
+            f'<div style="border:1px solid #e0e0e0;padding:14px;background:#fff;">'
+            f'<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px;">'
+            f'<span style="font-weight:700;font-size:13px;color:#2c3e50;">{icon} {title}</span>'
+            f'<span style="font-size:10px;padding:2px 6px;background:{fb};color:{fc};font-weight:600;white-space:nowrap;">'
+            f'● {feas}可行性</span>'
+            f'</div>'
+            f'<div style="font-size:10px;color:#888;margin-bottom:8px;">来源：{asin}</div>'
+            f'<div style="display:grid;grid-template-columns:60px 1fr;gap:3px 8px;font-size:11px;line-height:1.6;">'
+            f'<span style="color:#888;">👤 用户说</span><span style="color:#444;">{pain}</span>'
+            f'<span style="color:#888;">🔧 怎么改</span><span style="color:#444;">{how}</span>'
+            f'<span style="color:#888;">📈 预期效果</span><span style="color:#1b5e20;font-weight:500;">{out}</span>'
+            f'</div></div>'
+        )
+
+    # ── 按 type 分3列 ──
+    type_order = ['功能创新','体验创新','包装形式创新']
+    cols_html = ''
+    for t in type_order:
+        items = by_type.get(t,[])
+        if not items:
+            continue
+        icon = TYPE_ICON.get(t,'💡')
+        cards = ''.join(opp_card(o) for o in items)
+        cols_html += (
+            f'<div>'
+            f'<div style="font-size:13px;font-weight:700;color:#2c3e50;padding:8px 12px;'
+            f'background:#f5f5f5;border-left:3px solid #2c3e50;margin-bottom:12px;">'
+            f'{icon} {t}</div>'
+            f'{cards}</div>'
+        )
+
+    # ── 立刻能做的高优先级 ──
+    quick_wins = ''
+    if top_opps:
+        qw_items = ''.join(
+            f'<div style="padding:10px 14px;border-left:4px solid #1b5e20;background:#e8f5e9;margin-bottom:8px;">'
+            f'<div style="font-weight:700;font-size:13px;color:#1b5e20;margin-bottom:4px;">'
+            f'{TYPE_ICON.get(o.get("type",""),"💡")} {o.get("title","")}'
+            f'<span style="font-size:11px;color:#888;font-weight:400;margin-left:6px;">(来源：{o["_asin"]})</span>'
+            f'</div>'
+            f'<div style="font-size:12px;color:#2e7d32;line-height:1.6;">'
+            f'→ {o.get("expected_outcome","")}</div>'
+            f'</div>'
+            for o in top_opps[:5]
+        )
+        quick_wins = (
+            f'<div style="margin-top:20px;border-top:1px solid #eee;padding-top:16px;">'
+            f'<div style="font-size:13px;font-weight:700;color:#1b5e20;margin-bottom:12px;">'
+            f'⚡ 立刻能做的机会（优先级1 × 高可行性）</div>'
+            f'{qw_items}</div>'
+        )
+
+    # ── 入局建议（来自 ai_summary）──
+    advice_block = ''
+    advice = ai_sum.get('advice','')
+    opp_txt = ai_sum.get('opportunity','')
+    if advice or opp_txt:
+        advice_block = (
+            f'<div style="margin-top:20px;border-top:1px solid #eee;padding-top:16px;">'
+            f'<div style="font-size:13px;font-weight:700;color:#1565c0;margin-bottom:12px;">'
+            f'🎯 入局策略建议</div>'
+        )
+        if opp_txt:
+            advice_block += (
+                f'<div style="background:#e3f2fd;border-left:4px solid #1565c0;padding:12px 16px;'
+                f'font-size:13px;line-height:1.8;color:#0d47a1;margin-bottom:10px;">'
+                f'<strong>品类机会点：</strong>{opp_txt}</div>'
+            )
+        if advice:
+            advice_block += (
+                f'<div style="background:#e8f5e9;border-left:4px solid #1b5e20;padding:12px 16px;'
+                f'font-size:13px;line-height:1.8;color:#1b5e20;">'
+                f'<strong>入场路径：</strong>{advice}</div>'
+            )
+        advice_block += '</div>'
+
+    n_types = len([t for t in type_order if by_type.get(t)])
+    cols_css = f'grid-template-columns:repeat({max(1,n_types)},1fr)'
+    html = (
+        f'<div style="display:grid;{cols_css};gap:16px;margin-bottom:4px;">'
+        f'{cols_html}</div>'
+        f'{quick_wins}'
+        f'{advice_block}'
+    )
+    return html
+
+
 def build_category_html(data, generated_at):
     meta     = data.get('meta', {})
     products = data.get('products', [])
@@ -282,17 +524,150 @@ def build_category_html(data, generated_at):
         rc     = prod.get('review_count','—')
         ol     = prod.get('one_liner','')
         absa_p = prod.get('absa', [])
+        rs     = prod.get('review_summary', {})
+        inn    = prod.get('innovation', {})
+
         absa_chart_html = ''
         if absa_p:
             absa_chart_html = f'<div id="chart-{asin_p}" style="height:160px;margin-top:12px;"></div>'
-        p.append(f'<details style="margin-bottom:8px;">'
-                 f'<summary>📦 {asin_p} &nbsp; {str(ttl)[:60]} &nbsp; '
-                 f'<span style="color:#f9a825;">★{ra}</span> &nbsp; '
-                 f'<span style="color:#888;font-size:12px;">{rc}条评论 · {pr}</span></summary>'
-                 f'<div class="detail-body">'
-                 f'<div style="font-size:13px;color:#444;line-height:1.7;">{ol or "暂无点评"}</div>'
-                 f'{absa_chart_html}</div></details>')
+
+        # ── 好差评汇总模块 ──
+        rs_html = ''
+        if rs:
+            verdict = rs.get('overall_verdict','')
+            positives = rs.get('positive', [])
+            negatives = rs.get('negative', [])
+
+            def dim_rows_cat(items, side):
+                if not items:
+                    return '<div style="color:#aaa;font-size:12px;padding:8px;">暂无数据</div>'
+                html = ''
+                for item in items:
+                    dim   = item.get('dimension','')
+                    score = item.get('sentiment_score','')
+                    ins   = item.get('insight','')
+                    quotes = item.get('quotes',[])
+                    sc    = '#1b5e20' if side=='pos' else '#b71c1c'
+                    icon  = '★' if side=='pos' else '●'
+                    q_html = ''.join(
+                        '<div style="font-size:11px;color:#555;padding:3px 0 3px 8px;border-left:2px solid #e0e0e0;margin-top:3px;">▸ ' + q + '</div>'
+                        for q in quotes[:2])
+                    html += (
+                        '<div style="margin-bottom:14px;">'
+                        '<div style="display:flex;align-items:baseline;gap:6px;margin-bottom:4px;">'
+                        '<span style="font-weight:700;font-size:12px;color:#2c3e50;">[' + dim + ']</span>'
+                        '<span style="font-size:11px;font-weight:600;color:' + sc + ';">' + icon + str(score) + '</span>'
+                        '</div>'
+                        '<div style="font-size:11px;line-height:1.6;color:#444;background:#fafafa;padding:6px 8px;border-left:3px solid ' + sc + ';">' + ins + '</div>'
+                        + q_html +
+                        '</div>'
+                    )
+                return html
+
+            verdict_html = ''
+            if verdict:
+                verdict_html = (
+                    '<div style="background:#f5f5f5;border-left:4px solid #607d8b;padding:10px 14px;'
+                    'margin-bottom:14px;font-size:12px;line-height:1.7;color:#37474f;">'
+                    '📊 <strong>整体结论：</strong>' + verdict + '</div>'
+                )
+
+            rs_html = (
+                '<div style="margin-top:16px;border-top:1px solid #eee;padding-top:14px;">'
+                '<div style="font-size:13px;font-weight:700;color:#2c3e50;margin-bottom:10px;">📣 好差评深度汇总</div>'
+                + verdict_html +
+                '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">'
+                '<div>'
+                '<div style="font-size:12px;font-weight:700;color:#1b5e20;padding:6px 10px;background:#e8f5e9;margin-bottom:10px;">👍 好评核心</div>'
+                + dim_rows_cat(positives, 'pos') +
+                '</div>'
+                '<div>'
+                '<div style="font-size:12px;font-weight:700;color:#b71c1c;padding:6px 10px;background:#ffebee;margin-bottom:10px;">👎 差评核心</div>'
+                + dim_rows_cat(negatives, 'neg') +
+                '</div>'
+                '</div></div>'
+            )
+
+        # ── 产品创新点模块 ──
+        inn_html = ''
+        if inn:
+            summary = inn.get('summary','')
+            opps    = sorted(inn.get('opportunities',[]), key=lambda x: x.get('priority',99))
+            fc_map  = {'高':'#1b5e20','中':'#e65100','低':'#9e9e9e'}
+            fb_map  = {'高':'#e8f5e9','中':'#fff3e0','低':'#f5f5f5'}
+            ti_map  = {'功能创新':'🔧','体验创新':'✨','包装形式创新':'📦'}
+
+            sum_html = ''
+            if summary:
+                sum_html = (
+                    '<div style="background:#e3f2fd;border-left:4px solid #1565c0;padding:10px 14px;'
+                    'margin-bottom:12px;font-size:12px;line-height:1.7;color:#0d47a1;">'
+                    '🔭 <strong>创新方向：</strong>' + summary + '</div>'
+                )
+
+            opps_html = ''
+            for opp in opps:
+                oid   = opp.get('id','')
+                otype = opp.get('type','')
+                title = opp.get('title','')
+                pain  = opp.get('user_pain','')
+                evid  = opp.get('evidence','')
+                how   = opp.get('how_to_improve','')
+                out   = opp.get('expected_outcome','')
+                feas  = opp.get('feasibility','中')
+                icon  = ti_map.get(otype,'💡')
+                fc    = fc_map.get(feas,'#9e9e9e')
+                fb    = fb_map.get(feas,'#f5f5f5')
+                opps_html += (
+                    '<div style="border:1px solid #e0e0e0;padding:12px;margin-bottom:8px;">'
+                    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">'
+                    '<div style="font-weight:700;font-size:13px;color:#2c3e50;">'
+                    + icon + ' <span style="color:#888;font-size:11px;margin-right:4px;">优先级' + str(oid) + '</span>' + title +
+                    '</div>'
+                    '<span style="font-size:11px;font-weight:600;padding:2px 7px;background:' + fb + ';color:' + fc + ';">● ' + feas + '可行性</span>'
+                    '</div>'
+                    '<div style="display:grid;grid-template-columns:80px 1fr;gap:3px 8px;font-size:11px;line-height:1.6;">'
+                    '<span style="color:#888;">👤 用户说：</span><span style="color:#444;">' + pain + '</span>'
+                    '<span style="color:#888;">📎 依据：</span><span style="color:#555;font-style:italic;">' + evid + '</span>'
+                    '<span style="color:#888;">🔧 怎么改：</span><span style="color:#444;">' + how + '</span>'
+                    '<span style="color:#888;">📈 预期效果：</span><span style="color:#1b5e20;font-weight:500;">' + out + '</span>'
+                    '</div></div>'
+                )
+
+            inn_html = (
+                '<div style="margin-top:16px;border-top:1px solid #eee;padding-top:14px;">'
+                '<div style="font-size:13px;font-weight:700;color:#2c3e50;margin-bottom:10px;">💡 产品创新机会</div>'
+                + sum_html + opps_html +
+                '</div>'
+            )
+
+        p.append(
+            f'<details style="margin-bottom:8px;">'
+            f'<summary>📦 {asin_p} &nbsp; {str(ttl)[:60]} &nbsp; '
+            f'<span style="color:#f9a825;">★{ra}</span> &nbsp; '
+            f'<span style="color:#888;font-size:12px;">{rc}条评论 · {pr} · 点击展开详细分析</span></summary>'
+            f'<div class="detail-body">'
+            f'<div style="font-size:13px;color:#444;line-height:1.7;margin-bottom:8px;">{ol or "暂无点评"}</div>'
+            f'{absa_chart_html}'
+            f'{rs_html}'
+            f'{inn_html}'
+            f'</div></details>'
+        )
     p.append('</div>')
+
+    # 第8部分：品类好差评横向对比
+    rs_sec = build_rs_section(products)
+    if rs_sec:
+        p.append(section_header('八', '品类好差评横向对比'))
+        p.append(rs_sec)
+        p.append('</div>')
+
+    # 第9部分：品类创新机会汇总
+    inn_sec = build_innovation_section(products, ai_sum)
+    if inn_sec:
+        p.append(section_header('九', '品类创新机会汇总'))
+        p.append(inn_sec)
+        p.append('</div>')
 
     p.append(f'<footer>由 OpenClaw amazon-insights skill 生成 · {generated_at}</footer>')
 

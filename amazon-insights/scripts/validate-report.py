@@ -5,7 +5,7 @@ validate-report.py — HTML 报告结构完整性校验 + fallback 生成
 用法:
   python3 validate-report.py <report.html> [--type single|category] [--data <data.json>]
 
-单品报告最低要求：核心 h2 >= 4 个，ECharts 容器 >= 2 个
+单品报告最低要求：核心 h2 >= 6 个，ECharts 容器 >= 2 个
 品类报告最低要求：核心 h2 >= 7 个，ECharts 容器 >= 3 个，details 折叠卡片 >= 1
 
 退出码:
@@ -51,13 +51,13 @@ def validate(html_path, report_type):
 
     if report_type == "single":
         checks = {
-            f"h2标题数量({h2_count})>=4":   h2_count >= 4,
+            f"h2标题数量({h2_count})>=6":   h2_count >= 6,
             f"ECharts容器({chart_count})>=2": chart_count >= 2,
             "包含ECharts脚本":               has_echarts,
         }
     else:  # category
         checks = {
-            f"h2标题数量({h2_count})>=7":       h2_count >= 7,
+            f"h2标题数量({h2_count})>=9":       h2_count >= 9,
             f"ECharts容器({chart_count})>=3":   chart_count >= 3,
             f"details折叠卡片({details_count})>=1": details_count >= 1,
             "包含ECharts脚本":                  has_echarts,

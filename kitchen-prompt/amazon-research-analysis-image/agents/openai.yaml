@@ -1,0 +1,7 @@
+interface:
+  display_name: "Amazon Flow: 场景化采集分析"
+  short_description: "Scenario驱动：actor采集、报告与生图提示词"
+  default_prompt: "Use $amazon-research-analysis-image to resolve my request into a scenario, execute actor-based collection, and deliver both report artifacts and Chinese image prompts."
+
+policy:
+  allow_implicit_invocation: true

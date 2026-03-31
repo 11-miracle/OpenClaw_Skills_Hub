@@ -1,0 +1,15 @@
+{
+  "amazon": {
+    "default_domain": "amazon.com",
+    "search": {
+      "keyword_bestsellers_actor": "apify~amazon-product-scraper",
+      "keyword_new_releases_actor": "apify~amazon-product-scraper",
+      "asin_bestsellers_actor": "apify~amazon-bestsellers-scraper",
+      "asin_new_releases_actor": "apify~amazon-bestsellers-scraper"
+    },
+    "reviews": {
+      "primary_actor": "delicious_zebu~amazon-reviews-scraper-with-advanced-filters",
+      "fallback_actors": []
+    }
+  }
+}
